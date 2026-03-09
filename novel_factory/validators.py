@@ -8,6 +8,8 @@ from collections import Counter
 from novel_factory.schemas import (
     ContinuityState,
     DeterministicValidationReport,
+    Outline,
+    PlanValidationReport,
     SceneCard,
     StorySpec,
     ValidationFinding,
@@ -244,9 +246,13 @@ class SceneValidator:
         continuity_state: ContinuityState,
     ) -> list[ValidationFinding]:
         findings: list[ValidationFinding] = []
-        lower_text = scene_text.lower()
+        lower_text = self._normalize_match_text(scene_text)
         forbidden_entities = list(scene_card.forbidden_entities) + list(continuity_state.disallowed_entities)
-        forbidden_hits = [entity for entity in forbidden_entities if entity and entity.lower() in lower_text]
+        forbidden_hits = [
+            entity
+            for entity in forbidden_entities
+            if entity and self._normalize_match_text(entity) in lower_text
+        ]
         if forbidden_hits:
             findings.append(
                 ValidationFinding(
@@ -434,7 +440,7 @@ class SceneValidator:
     def _matches_required_entity(self, entity: str, lower_text: str) -> bool:
         """Returns True when a required entity or one of its alternatives is present."""
 
-        lower_entity = entity.lower().strip()
+        lower_entity = self._normalize_match_text(entity)
         candidate_entities = self._entity_match_candidates(lower_entity)
         if any(candidate in lower_text for candidate in candidate_entities):
             return True
@@ -452,6 +458,9 @@ class SceneValidator:
         """Returns normalized match candidates for a concrete required entity."""
 
         candidates = [entity.strip()]
+        trimmed_prefix = re.sub(r"^(archived|historical|legacy)\s+", "", entity).strip()
+        if trimmed_prefix and trimmed_prefix not in candidates:
+            candidates.append(trimmed_prefix)
         simplified = re.sub(r"^(figure|number|count|estimate)\s+of\s+", "", entity).strip()
         if simplified and simplified not in candidates:
             candidates.append(simplified)
@@ -480,8 +489,248 @@ class SceneValidator:
         ).strip()
         if trimmed_suffix and trimmed_suffix not in candidates:
             candidates.append(trimmed_suffix)
+        singularized = (
+            entity.replace("complaints", "complaint")
+            .replace("packets", "packet")
+            .replace("files", "file")
+            .strip()
+        )
+        if singularized and singularized not in candidates:
+            candidates.append(singularized)
+        if trimmed_prefix:
+            singularized_trimmed = (
+                trimmed_prefix.replace("complaints", "complaint")
+                .replace("packets", "packet")
+                .replace("files", "file")
+                .strip()
+            )
+            if singularized_trimmed and singularized_trimmed not in candidates:
+                candidates.append(singularized_trimmed)
         if " showing " in entity:
             showing_prefix = entity.split(" showing ", maxsplit=1)[0].strip()
             if showing_prefix and showing_prefix not in candidates:
                 candidates.append(showing_prefix)
+        if entity.endswith(" request"):
+            request_set = entity[: -len(" request")].strip() + " set"
+            request_form = entity[: -len(" request")].strip() + " form"
+            for candidate in (request_set, request_form):
+                if candidate and candidate not in candidates:
+                    candidates.append(candidate)
         return candidates
+
+    def _normalize_match_text(self, value: str) -> str:
+        """Normalizes punctuation variants for entity matching."""
+
+        return (
+            (value or "")
+            .lower()
+            .replace("\u2019", "'")
+            .replace("\u2018", "'")
+            .replace("\u201c", '"')
+            .replace("\u201d", '"')
+            .replace("\u00a0", " ")
+            .strip()
+        )
+
+
+class PlanValidator:
+    """Runs deterministic checks on planning artifacts before drafting begins."""
+
+    PLACEHOLDER_VALUES = {"", "none", "n/a", "no change", "unchanged", "not applicable"}
+
+    def validate(
+        self,
+        *,
+        story_spec: StorySpec,
+        outline: Outline,
+        scene_cards: list[SceneCard],
+        initial_continuity: ContinuityState,
+    ) -> PlanValidationReport:
+        """Runs plan-level validation for bootstrap artifacts."""
+
+        findings: list[ValidationFinding] = []
+        findings.extend(self._structure_findings(story_spec, outline, scene_cards))
+        findings.extend(self._scene_contract_findings(scene_cards))
+        findings.extend(self._counterforce_findings(scene_cards))
+        findings.extend(self._rolling_intensity_findings(scene_cards))
+        findings.extend(self._initial_continuity_findings(initial_continuity))
+        has_errors = any(finding.severity == "error" for finding in findings)
+        return PlanValidationReport(pass_fail=not has_errors, findings=findings)
+
+    def _structure_findings(
+        self,
+        story_spec: StorySpec,
+        outline: Outline,
+        scene_cards: list[SceneCard],
+    ) -> list[ValidationFinding]:
+        findings: list[ValidationFinding] = []
+        if len(outline.chapters) != story_spec.expected_chapters:
+            findings.append(
+                ValidationFinding(
+                    check_id="outline_chapter_count",
+                    severity="error",
+                    message="Outline chapter count does not match StorySpec.",
+                    details=[
+                        f"Expected: {story_spec.expected_chapters}",
+                        f"Actual: {len(outline.chapters)}",
+                    ],
+                )
+            )
+        if len(scene_cards) != story_spec.expected_scenes:
+            findings.append(
+                ValidationFinding(
+                    check_id="scene_card_count",
+                    severity="error",
+                    message="Scene-card count does not match StorySpec.",
+                    details=[
+                        f"Expected: {story_spec.expected_scenes}",
+                        f"Actual: {len(scene_cards)}",
+                    ],
+                )
+            )
+        ordered_scene_numbers = [scene.scene_number for scene in sorted(scene_cards, key=lambda item: item.scene_number)]
+        expected_numbers = list(range(1, len(scene_cards) + 1))
+        if ordered_scene_numbers and ordered_scene_numbers != expected_numbers:
+            findings.append(
+                ValidationFinding(
+                    check_id="scene_numbering",
+                    severity="error",
+                    message="Scene numbering is not contiguous from 1..N.",
+                    details=[f"Actual: {ordered_scene_numbers[:12]}"],
+                )
+            )
+        return findings
+
+    def _scene_contract_findings(self, scene_cards: list[SceneCard]) -> list[ValidationFinding]:
+        findings: list[ValidationFinding] = []
+        required_fields = (
+            "scene_type",
+            "opening_disturbance",
+            "mid_scene_reversal",
+            "visible_decision",
+            "closing_choice",
+            "counterforce_trace",
+            "scene_desire",
+            "scene_fear",
+            "secret_pressure",
+            "subtext_engine",
+            "power_shift",
+            "relationship_delta",
+            "cost_paid",
+            "suspicion_delta",
+            "sensory_anchor",
+        )
+        for scene in scene_cards:
+            missing = [
+                field_name
+                for field_name in required_fields
+                if self._is_placeholder(getattr(scene, field_name))
+            ]
+            if missing:
+                findings.append(
+                    ValidationFinding(
+                        check_id="thin_scene_card",
+                        severity="error",
+                        message=f"Scene {scene.scene_number} is missing required kinetic scene-card fields.",
+                        details=missing,
+                    )
+                )
+        return findings
+
+    def _counterforce_findings(self, scene_cards: list[SceneCard]) -> list[ValidationFinding]:
+        first_six = scene_cards[:6]
+        if any(self._has_counterforce_trace(scene) for scene in first_six):
+            return []
+        return [
+            ValidationFinding(
+                check_id="early_counterforce_absent",
+                severity="error",
+                message="No concrete counterforce trace appears by scene 6.",
+                details=["Add a rumor, review footprint, extract request, human pursuer trace, or similar signal."],
+            )
+        ]
+
+    def _rolling_intensity_findings(self, scene_cards: list[SceneCard]) -> list[ValidationFinding]:
+        findings: list[ValidationFinding] = []
+        if len(scene_cards) < 3:
+            return findings
+        for start in range(0, len(scene_cards) - 2):
+            window = scene_cards[start : start + 3]
+            if any(self._window_intensifier(scene) for scene in window):
+                continue
+            findings.append(
+                ValidationFinding(
+                    check_id="rolling_intensity_gap",
+                    severity="error",
+                    message="A 3-scene planning window fails to intensify pursuit, relationship loss, or moral compromise.",
+                    details=[f"Scenes {window[0].scene_number}-{window[-1].scene_number}"],
+                )
+            )
+        return findings
+
+    def _initial_continuity_findings(
+        self,
+        initial_continuity: ContinuityState,
+    ) -> list[ValidationFinding]:
+        findings: list[ValidationFinding] = []
+        if initial_continuity.recent_scene_summaries:
+            findings.append(
+                ValidationFinding(
+                    check_id="initial_recent_summaries",
+                    severity="error",
+                    message="Initial continuity should not include recent scene summaries.",
+                    details=initial_continuity.recent_scene_summaries,
+                )
+            )
+        if initial_continuity.last_approved_scene_number != 0:
+            findings.append(
+                ValidationFinding(
+                    check_id="initial_last_approved_scene_number",
+                    severity="error",
+                    message="Initial continuity must start at scene 0.",
+                    details=[str(initial_continuity.last_approved_scene_number)],
+                )
+            )
+        return findings
+
+    def _has_counterforce_trace(self, scene: SceneCard) -> bool:
+        trace = scene.counterforce_trace
+        if self._is_placeholder(trace):
+            return False
+        return any(
+            keyword in trace.lower()
+            for keyword in (
+                "marta",
+                "conduct",
+                "review",
+                "suspicion",
+                "extract",
+                "audit",
+                "question",
+                "inquiry",
+                "memo",
+                "trace",
+                "footprint",
+                "compliance",
+            )
+        )
+
+    def _window_intensifier(self, scene: SceneCard) -> bool:
+        suspicion_text = " ".join([scene.suspicion_delta, scene.counterforce_trace]).lower()
+        relationship_text = " ".join([scene.relationship_delta, scene.cost_paid, scene.secret_pressure]).lower()
+        moral_text = " ".join(
+            [
+                scene.secret_pressure,
+                scene.cost_paid,
+                scene.visible_decision,
+                scene.closing_choice,
+            ]
+        ).lower()
+        return (
+            any(keyword in suspicion_text for keyword in ("marta", "conduct", "review", "suspicion", "extract", "audit", "closer"))
+            or any(keyword in relationship_text for keyword in ("elena", "marriage", "withdraw", "distance", "silence", "home", "leave", "refuse", "cold"))
+            or any(keyword in moral_text for keyword in ("lie", "conceal", "withhold", "tamper", "deceive", "betray", "break", "violate", "cover", "manipulate", "hide"))
+        )
+
+    def _is_placeholder(self, value: str) -> bool:
+        return re.sub(r"\s+", " ", value or "").strip().lower() in self.PLACEHOLDER_VALUES

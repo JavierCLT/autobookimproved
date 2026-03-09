@@ -66,6 +66,10 @@ class RunStorage:
         return self.root / "scene_cards.json"
 
     @property
+    def plan_qa_path(self) -> Path:
+        return self.root / "plan_qa_report.json"
+
+    @property
     def continuity_path(self) -> Path:
         return self.root / "continuity_state.json"
 
@@ -108,6 +112,12 @@ class RunStorage:
 
     def scene_qa_path(self, scene_number: int) -> Path:
         return self.qa_dir / f"scene_{format_scene_number(scene_number)}_qa.json"
+
+    def chapter_qa_path(self, chapter_number: int) -> Path:
+        return self.qa_dir / f"chapter_{format_chapter_number(chapter_number)}_qa.json"
+
+    def arc_qa_path(self, arc_name: str) -> Path:
+        return self.qa_dir / f"arc_{slugify(arc_name)}_qa.json"
 
     def save_text(self, path: Path, text: str) -> None:
         """Saves a plain-text file."""

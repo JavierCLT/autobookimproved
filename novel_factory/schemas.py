@@ -103,6 +103,12 @@ class SceneCard(ArtifactModel):
     location: str
     time_marker: str
     pov_character: str
+    scene_type: str
+    opening_disturbance: str
+    mid_scene_reversal: str
+    visible_decision: str
+    closing_choice: str
+    counterforce_trace: str
 
     purpose: str
     conflict: str
@@ -194,6 +200,13 @@ class DeterministicValidationReport(ArtifactModel):
     repeated_phrases: List[str] = Field(default_factory=list)
 
 
+class PlanValidationReport(ArtifactModel):
+    """Aggregated local validation results for planning artifacts."""
+
+    pass_fail: bool
+    findings: List[ValidationFinding] = Field(default_factory=list)
+
+
 class SceneQaReport(ArtifactModel):
     """Model-based QA verdict for a drafted scene."""
 
@@ -205,6 +218,11 @@ class SceneQaReport(ArtifactModel):
     specificity_score: int = Field(ge=1, le=5)
     prose_freshness_score: int = Field(ge=1, le=5)
     emotional_movement_score: int = Field(ge=1, le=5)
+    subtext_score: int = Field(ge=1, le=5)
+    concealment_score: int = Field(ge=1, le=5)
+    leverage_shift_score: int = Field(ge=1, le=5)
+    relationship_cost_score: int = Field(ge=1, le=5)
+    commercial_hook_score: int = Field(ge=1, le=5)
     ai_smell_score: int = Field(ge=1, le=5)
     hard_fail_reasons: List[str] = Field(default_factory=list)
     soft_issues: List[str] = Field(default_factory=list)
@@ -219,6 +237,33 @@ class RepairTarget(ArtifactModel):
     scene_number: int
     reason: str
     rewrite_brief: str
+
+
+class ChapterQaReport(ArtifactModel):
+    """Chapter-level editorial QA verdict."""
+
+    chapter_number: int
+    pass_fail: bool
+    suspense_score: int = Field(ge=1, le=5)
+    emotional_voltage_score: int = Field(ge=1, le=5)
+    clarity_score: int = Field(ge=1, le=5)
+    ending_drive_score: int = Field(ge=1, le=5)
+    major_problems: List[str] = Field(default_factory=list)
+    repair_targets: List[RepairTarget] = Field(default_factory=list)
+
+
+class ArcQaReport(ArtifactModel):
+    """Arc-level editorial QA verdict for a targeted scene cluster."""
+
+    arc_name: str
+    scene_numbers: List[int] = Field(default_factory=list)
+    pass_fail: bool
+    propulsion_score: int = Field(ge=1, le=5)
+    pressure_score: int = Field(ge=1, le=5)
+    relationship_score: int = Field(ge=1, le=5)
+    payoff_readiness_score: int = Field(ge=1, le=5)
+    major_problems: List[str] = Field(default_factory=list)
+    repair_targets: List[RepairTarget] = Field(default_factory=list)
 
 
 class GlobalQaReport(ArtifactModel):

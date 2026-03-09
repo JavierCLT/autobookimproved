@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -12,10 +13,13 @@ from novel_factory.generators import NovelGenerator
 from novel_factory.judges import GlobalJudge, SceneJudge
 from novel_factory.llm import OpenAIResponsesClient
 from novel_factory.schemas import (
+    ArcQaReport,
+    ChapterQaReport,
     ContinuityState,
     DeterministicValidationReport,
     GlobalQaReport,
     Outline,
+    RepairTarget,
     SceneCard,
     SceneCardCollection,
     SceneQaReport,
@@ -28,7 +32,7 @@ from novel_factory.utils import (
     plain_text_from_markdown,
     truncate_text,
 )
-from novel_factory.validators import SceneValidator
+from novel_factory.validators import PlanValidator, SceneValidator
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +59,7 @@ class NovelPipeline:
         self.config = config
         self.llm = OpenAIResponsesClient(config)
         self.generators = NovelGenerator(self.llm, config)
+        self.plan_validator = PlanValidator()
         self.validator = SceneValidator()
         self.scene_judge = SceneJudge(self.llm, config)
         self.global_judge = GlobalJudge(self.llm, config)
@@ -106,6 +111,19 @@ class NovelPipeline:
             initial_continuity = self.generators.generate_initial_continuity(story_spec, outline)
             storage.save_model(storage.initial_continuity_path, initial_continuity)
             storage.append_log("initial_continuity_generated", {})
+
+        plan_report = self.plan_validator.validate(
+            story_spec=story_spec,
+            outline=outline,
+            scene_cards=scene_cards,
+            initial_continuity=initial_continuity,
+        )
+        storage.save_model(storage.plan_qa_path, plan_report)
+        storage.append_log("plan_validation_completed", {"pass_fail": plan_report.pass_fail})
+        if not plan_report.pass_fail:
+            raise RuntimeError(
+                "Planning artifacts failed deterministic plan QA. Adjust the bootstrap prompts or start from a fresh project slug."
+            )
 
         if not storage.continuity_path.exists():
             storage.save_model(storage.continuity_path, initial_continuity)
@@ -188,6 +206,7 @@ class NovelPipeline:
             self.draft_scene(project=project, scene_index=scene_number)
 
         self.assemble_manuscript(project=project)
+        self._run_editorial_qa(project=project)
         report = self.global_qa(project=project)
         if report.pass_fail:
             return report
@@ -242,6 +261,35 @@ class NovelPipeline:
         storage.save_model(storage.global_qa_path, report)
         storage.append_log("global_qa_completed", {"pass_fail": report.pass_fail})
         return report
+
+    def _run_editorial_qa(self, *, project: str) -> None:
+        """Runs chapter and arc QA before the manuscript-level judge."""
+
+        storage = RunStorage(self.config, project)
+        for round_number in range(0, 2):
+            artifacts = self._load_project_artifacts(storage)
+            chapter_reports, arc_reports = self._judge_editorial_layers(
+                storage=storage,
+                artifacts=artifacts,
+            )
+            repair_targets = self._collect_editorial_repair_targets(chapter_reports, arc_reports)
+            if not repair_targets:
+                return
+            if round_number >= 1:
+                raise RuntimeError(
+                    "Editorial QA still failed after targeted scene repairs. Inspect chapter and arc QA reports."
+                )
+            self._apply_editorial_repair_targets(
+                storage=storage,
+                artifacts=artifacts,
+                repair_targets=repair_targets,
+            )
+            self._rebuild_continuity_from_approved_scenes(
+                storage=storage,
+                story_spec=artifacts.story_spec,
+                scene_cards=artifacts.scene_cards,
+            )
+            self.assemble_manuscript(project=project)
 
     def repair_project(self, *, project: str) -> GlobalQaReport:
         """Applies targeted scene repairs from a failed global QA report."""
@@ -309,7 +357,144 @@ class NovelPipeline:
             scene_cards=artifacts.scene_cards,
         )
         self.assemble_manuscript(project=project)
+        self._run_editorial_qa(project=project)
         return self.global_qa(project=project)
+
+    def _judge_editorial_layers(
+        self,
+        *,
+        storage: RunStorage,
+        artifacts: ProjectArtifacts,
+    ) -> tuple[list[ChapterQaReport], list[ArcQaReport]]:
+        """Runs chapter-level and targeted arc-level QA."""
+
+        chapter_reports: list[ChapterQaReport] = []
+        for chapter in artifacts.outline.chapters:
+            chapter_text = storage.load_text(storage.chapter_path(chapter.chapter_number))
+            report = self.global_judge.judge_chapter(
+                story_spec=artifacts.story_spec,
+                outline=artifacts.outline,
+                chapter_number=chapter.chapter_number,
+                chapter_text=chapter_text,
+                scene_cards=artifacts.scene_cards,
+            )
+            storage.save_model(storage.chapter_qa_path(chapter.chapter_number), report)
+            chapter_reports.append(report)
+
+        arc_reports: list[ArcQaReport] = []
+        for arc_name, arc_focus, scene_numbers in self._editorial_arc_specs(artifacts.scene_cards):
+            arc_text = "\n\n".join(
+                storage.load_text(storage.scene_path(scene_number)).strip()
+                for scene_number in scene_numbers
+            ).strip()
+            report = self.global_judge.judge_arc(
+                story_spec=artifacts.story_spec,
+                outline=artifacts.outline,
+                arc_name=arc_name,
+                arc_focus=arc_focus,
+                scene_numbers=scene_numbers,
+                arc_text=arc_text,
+            )
+            storage.save_model(storage.arc_qa_path(arc_name), report)
+            arc_reports.append(report)
+
+        storage.append_log(
+            "editorial_qa_completed",
+            {
+                "chapter_failures": sum(1 for report in chapter_reports if not report.pass_fail),
+                "arc_failures": sum(1 for report in arc_reports if not report.pass_fail),
+            },
+        )
+        return chapter_reports, arc_reports
+
+    def _collect_editorial_repair_targets(
+        self,
+        chapter_reports: list[ChapterQaReport],
+        arc_reports: list[ArcQaReport],
+    ) -> list[RepairTarget]:
+        """Collapses chapter and arc repair targets into a minimal scene list."""
+
+        merged: dict[int, RepairTarget] = {}
+        for report in [*chapter_reports, *arc_reports]:
+            if report.pass_fail:
+                continue
+            if not report.repair_targets:
+                raise RuntimeError("Editorial QA failed without scene-level repair targets.")
+            for target in report.repair_targets:
+                existing = merged.get(target.scene_number)
+                if existing is None:
+                    merged[target.scene_number] = target
+                    continue
+                merged[target.scene_number] = RepairTarget(
+                    scene_number=target.scene_number,
+                    reason="; ".join(
+                        sorted(
+                            {
+                                existing.reason.strip(),
+                                target.reason.strip(),
+                            }
+                        )
+                    ),
+                    rewrite_brief="\n".join(
+                        dict.fromkeys(
+                            [
+                                existing.rewrite_brief.strip(),
+                                target.rewrite_brief.strip(),
+                            ]
+                        )
+                    ).strip(),
+                )
+        return [merged[number] for number in sorted(merged)]
+
+    def _apply_editorial_repair_targets(
+        self,
+        *,
+        storage: RunStorage,
+        artifacts: ProjectArtifacts,
+        repair_targets: list[RepairTarget],
+    ) -> None:
+        """Rewrites scene targets raised by chapter or arc QA."""
+
+        for target in repair_targets:
+            scene_card = get_scene_card(artifacts.scene_cards, target.scene_number)
+            continuity_before = self._continuity_before_scene(
+                storage=storage,
+                story_spec=artifacts.story_spec,
+                scene_cards=artifacts.scene_cards,
+                scene_number=target.scene_number,
+            )
+            current_scene = storage.load_text(storage.scene_path(target.scene_number))
+            repaired_scene, repaired_qa = self._run_scene_loop(
+                storage=storage,
+                story_spec=artifacts.story_spec,
+                outline=artifacts.outline,
+                scene_card=scene_card,
+                continuity_before=continuity_before,
+                phase_label="editorial_repair",
+                attempt_generator=lambda rewrite_brief, current_draft, scene_card=scene_card, continuity_before=continuity_before, current_scene=current_scene, target=target: self.generators.draft_scene(
+                    story_spec=artifacts.story_spec,
+                    outline=artifacts.outline,
+                    scene_card=scene_card,
+                    continuity_state=continuity_before,
+                    recent_scene_summaries=self._recent_summaries(continuity_before),
+                    rewrite_brief=rewrite_brief or target.rewrite_brief,
+                    current_draft=current_draft or current_scene,
+                ),
+                initial_rewrite_brief=target.rewrite_brief,
+                initial_current_draft=current_scene,
+            )
+            self._approve_scene(
+                storage=storage,
+                story_spec=artifacts.story_spec,
+                scene_card=scene_card,
+                continuity_before=continuity_before,
+                scene_text=repaired_scene,
+                qa_report=repaired_qa,
+            )
+            storage.append_log(
+                "scene_editorially_repaired",
+                {"scene_number": target.scene_number, "reason": target.reason},
+            )
 
     def _load_project_artifacts(self, storage: RunStorage) -> ProjectArtifacts:
         """Loads the persisted project artifacts."""
@@ -330,6 +515,71 @@ class NovelPipeline:
 
         summaries = continuity_state.recent_scene_summaries[-self.config.recent_scene_summaries :]
         return [truncate_text(summary, self.config.max_recent_scene_summary_chars) for summary in summaries]
+
+    def _editorial_arc_specs(self, scene_cards: list[SceneCard]) -> list[tuple[str, str, list[int]]]:
+        """Returns targeted manuscript slices for intermediate arc QA."""
+
+        total_scenes = len(scene_cards)
+        opening_numbers = list(range(1, min(total_scenes, 4) + 1))
+        counterforce_numbers = [
+            scene.scene_number for scene in scene_cards if self._scene_has_counterforce(scene)
+        ][:6]
+        relationship_numbers = [
+            scene.scene_number for scene in scene_cards if self._scene_has_relationship_pressure(scene)
+        ][:6]
+        ending_numbers = list(range(max(1, total_scenes - 3), total_scenes + 1))
+
+        specs: list[tuple[str, str, list[int]]] = [
+            (
+                "opening",
+                "Does the opening create immediate compulsion, visible human cost, and a concrete shadow of pursuit or consequence?",
+                opening_numbers,
+            ),
+            (
+                "ending",
+                "Does the ending convert containment, loss, and escape into emotional aftershock rather than elegant distance?",
+                ending_numbers,
+            ),
+        ]
+        if len(counterforce_numbers) >= 2:
+            specs.append(
+                (
+                    "counterforce",
+                    "Does the counterforce feel like a hunter rather than an abstract audit function, and does suspicion narrow the field?",
+                    counterforce_numbers,
+                )
+            )
+        if len(relationship_numbers) >= 2:
+            specs.append(
+                (
+                    "relationship",
+                    "Does the marriage deteriorate through refusals, absences, concealment, and cost rather than summary or theme?",
+                    relationship_numbers,
+                )
+            )
+        return specs
+
+    def _scene_has_counterforce(self, scene_card: SceneCard) -> bool:
+        """Returns True when a scene visibly advances pursuit or institutional shadow."""
+
+        text = " ".join(
+            [scene_card.counterforce_trace, scene_card.suspicion_delta, scene_card.pressure_source]
+        ).lower()
+        return any(
+            keyword in text
+            for keyword in ("marta", "conduct", "review", "suspicion", "extract", "audit", "inquiry", "question")
+        )
+
+    def _scene_has_relationship_pressure(self, scene_card: SceneCard) -> bool:
+        """Returns True when a scene materially advances the marriage/relationship arc."""
+
+        text = " ".join(
+            [scene_card.relationship_delta, scene_card.secret_pressure, scene_card.cost_paid]
+        ).lower()
+        return scene_card.pov_character.lower().startswith("elena") or any(
+            keyword in text
+            for keyword in ("elena", "marriage", "home", "withdraw", "silence", "distance", "leave", "refuse", "cold")
+        )
 
     def _run_scene_loop(
         self,
@@ -375,7 +625,12 @@ class NovelPipeline:
                 validation_report=validation_report,
                 scene_text=scene_text,
             )
-            merged_report = self._merge_validation_into_qa(qa_report, validation_report)
+            merged_report = self._merge_validation_into_qa(
+                qa_report,
+                validation_report,
+                scene_card=scene_card,
+                total_scenes=story_spec.expected_scenes,
+            )
             storage.save_model(storage.scene_qa_path(scene_card.scene_number), merged_report)
             storage.append_log(
                 "scene_attempt_completed",
@@ -413,6 +668,9 @@ class NovelPipeline:
         self,
         qa_report: SceneQaReport,
         validation_report: DeterministicValidationReport,
+        *,
+        scene_card: SceneCard,
+        total_scenes: int,
     ) -> SceneQaReport:
         """Applies deterministic failures and score thresholds to the model verdict."""
 
@@ -422,16 +680,26 @@ class NovelPipeline:
         )
 
         threshold_failures = []
-        for field_name in [
-            "continuity_score",
-            "engagement_score",
-            "voice_score",
-            "pacing_score",
-            "specificity_score",
-            "prose_freshness_score",
-            "emotional_movement_score",
-        ]:
-            if getattr(qa_report, field_name) < 3:
+        thresholds = {
+            "continuity_score": 4,
+            "engagement_score": 4,
+            "voice_score": 3,
+            "pacing_score": 4,
+            "specificity_score": 4,
+            "prose_freshness_score": 4,
+            "emotional_movement_score": 4,
+            "subtext_score": 4,
+            "concealment_score": 4,
+            "leverage_shift_score": 4,
+            "relationship_cost_score": 3,
+            "commercial_hook_score": 4,
+        }
+        if self._is_anchor_scene(scene_card=scene_card, total_scenes=total_scenes):
+            thresholds["voice_score"] = 4
+        if self._scene_needs_relationship_cost(scene_card):
+            thresholds["relationship_cost_score"] = 4
+        for field_name, minimum_score in thresholds.items():
+            if getattr(qa_report, field_name) < minimum_score:
                 threshold_failures.append(f"{field_name} fell below the acceptance threshold.")
         if qa_report.ai_smell_score >= 4:
             threshold_failures.append("AI-smell risk is above the acceptance threshold.")
@@ -469,7 +737,70 @@ class NovelPipeline:
             parts.append(
                 "Vary sentence openings and cadence, replace generic emotional shorthand with scene-specific detail, and cut explanatory dialogue."
             )
+        score_guidance = {
+            "engagement_score": "Increase immediate pressure and make the scene harder to stop reading within the first page.",
+            "pacing_score": "Cut explanatory drag, tighten turn timing, and ensure each beat changes the pressure.",
+            "prose_freshness_score": "Replace generic thriller phrasing with scene-specific language and sharper physical detail.",
+            "emotional_movement_score": "Make the emotional turn visible through behavior, choice, and consequence rather than summary.",
+            "subtext_score": "Reduce direct explanation and let omission, evasion, and behavior carry the scene's hidden argument.",
+            "concealment_score": "Put an active lie, omission, or cover story under pressure on-page.",
+            "leverage_shift_score": "Make the power balance clearly change by the end of the scene.",
+            "relationship_cost_score": "Ensure the scene exacts a visible interpersonal cost rather than only a thematic one.",
+            "commercial_hook_score": "Sharpen the opening disturbance and the closing choice so the scene creates stronger forward pull.",
+        }
+        for field_name, guidance in score_guidance.items():
+            if getattr(qa_report, field_name) < 4:
+                parts.append(guidance)
         return "\n".join(part for part in parts if part).strip()
+
+    def _is_anchor_scene(self, *, scene_card: SceneCard, total_scenes: int) -> bool:
+        """Returns True when a scene should clear a higher QA bar."""
+
+        lower_type = scene_card.scene_type.lower()
+        anchor_types = {
+            "opening",
+            "confrontation",
+            "domestic fracture",
+            "pursuit",
+            "breakup",
+            "midpoint",
+            "climax",
+            "fallout",
+            "ending",
+        }
+        anchor_numbers = {1, max(1, total_scenes // 2), min(total_scenes, (total_scenes // 2) + 1), max(1, total_scenes - 1), total_scenes}
+        return (
+            lower_type in anchor_types
+            or scene_card.scene_number in anchor_numbers
+            or scene_card.pov_character.lower().startswith("elena")
+        )
+
+    def _scene_needs_relationship_cost(self, scene_card: SceneCard) -> bool:
+        """Returns True when the scene should clear a higher interpersonal-cost bar."""
+
+        text = " ".join([scene_card.relationship_delta, scene_card.secret_pressure, scene_card.cost_paid]).lower()
+        relationship_patterns = (
+            r"\belena\b",
+            r"\bmarriage\b",
+            r"\bhusband\b",
+            r"\bwife\b",
+            r"\bhome\b",
+            r"\bdistance\b",
+            r"\bwithdraw\b",
+            r"\bwithdraws\b",
+            r"\bwithdrawal\b",
+            r"\bseparation\b",
+            r"\bseparate\b",
+            r"\bsplit\b",
+            r"\bdivorce\b",
+            r"\bleaves him\b",
+            r"\bleaves her\b",
+            r"\bleave him\b",
+            r"\bleave her\b",
+        )
+        return scene_card.pov_character.lower().startswith("elena") or any(
+            re.search(pattern, text) for pattern in relationship_patterns
+        )
 
     def _approve_scene(
         self,

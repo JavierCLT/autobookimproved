@@ -143,7 +143,14 @@ Requirements:
 - Each scene card must feel necessary and non-filler.
 - Default to about two scenes per chapter and preserve chapter numbering.
 - Each scene must have a specific conflict, pressure source, emotional turn, and end-mode.
+- Every scene card must define visible on-page movement, not just thematic function.
 - Each scene must also define:
+  - scene_type: a concise label such as confrontation, interview, domestic fracture, investigation, executive pressure, cover story, technical infiltration, fallout, or pursuit
+  - opening_disturbance: what destabilizes the scene immediately
+  - mid_scene_reversal: what changes the direction or leverage halfway through
+  - visible_decision: what concrete choice the POV character makes on-page
+  - closing_choice: the final action, refusal, concealment, or commitment that ends the scene
+  - counterforce_trace: what on-page sign of pursuit, review, institutional resistance, or human opposition is present here
   - scene_desire: what the POV character wants right now
   - scene_fear: what the POV character most wants to avoid right now
   - secret_pressure: what the POV character is hiding or suppressing
@@ -160,6 +167,7 @@ Requirements:
 - At least one meaningful thing must worsen, tighten, or become harder by the end of each scene.
 - Every 2-3 scenes, at least one of these must intensify: Marta's suspicion, Elena's withdrawal, or Daniel's moral compromise. If none intensify, the scene is probably decorative and should be cut or merged.
 - By scene 6 at latest, the counterforce must leave an on-page trace, rumor, memo, review footprint, or other concrete shadow.
+- If a scene could be paraphrased as competent analysis rather than dramatized conflict, redesign it before returning it.
 - Keep target_words between 900 and 2200 unless the dramatic function strongly justifies otherwise.
 
 StorySpec:
@@ -206,23 +214,23 @@ def scene_draft_system_prompt(story_spec: StorySpec) -> str:
         "The scene must earn its place, dramatize pressure, and move the story forward.\n"
         "Every scene must contain an active want, credible resistance, concealed pressure, a leverage shift, and a concrete cost.\n"
         "Subtext should be legible through behavior, rhythm, omission, and action rather than explained directly.\n"
+        "Technical or institutional explanation is allowed only when a character is using it to win, hide, delay, trap, or defend.\n"
+        "If a scene can be paraphrased as competent analysis, it fails.\n"
+        "No two explanatory paragraphs in a row unless the second paragraph materially changes leverage.\n"
         "Return only the scene text in markdown-ready prose without commentary or notes."
     )
 
 
 def scene_draft_user_prompt(
-    story_spec: StorySpec,
-    outline: Outline,
+    story_brief: str,
+    chapter_brief: str,
     scene_card: SceneCard,
-    continuity_state: ContinuityState,
+    continuity_brief: str,
     recent_scene_summaries: Iterable[str],
     rewrite_brief: Optional[str] = None,
     current_draft: Optional[str] = None,
 ) -> str:
     """Builds the prompt for initial drafts and rewrites."""
-    chapter_plan = next(
-        chapter for chapter in outline.chapters if chapter.chapter_number == scene_card.chapter_number
-    )
     summaries_block = "\n".join(f"- {summary}" for summary in recent_scene_summaries) or "- None yet"
     rewrite_block = rewrite_brief or "None. Draft this cleanly on the first pass."
     current_draft_block = current_draft or "No prior draft."
@@ -233,8 +241,14 @@ Write Scene {scene_card.scene_number} of the novel.
 Scene must achieve:
 - Chapter: {scene_card.chapter_number} ({scene_card.chapter_title})
 - POV: {scene_card.pov_character}
+- Scene type: {scene_card.scene_type}
 - Location: {scene_card.location}
 - Time marker: {scene_card.time_marker}
+- Opening disturbance: {scene_card.opening_disturbance}
+- Mid-scene reversal: {scene_card.mid_scene_reversal}
+- Visible decision: {scene_card.visible_decision}
+- Closing choice: {scene_card.closing_choice}
+- Counterforce trace: {scene_card.counterforce_trace}
 - Purpose: {scene_card.purpose}
 - Conflict: {scene_card.conflict}
 - Pressure source: {scene_card.pressure_source}
@@ -257,35 +271,41 @@ Continuity requirements:
 - Produce these outputs: {scene_card.continuity_outputs}
 - Required entities: {scene_card.required_entities}
 - Forbidden entities: {scene_card.forbidden_entities}
-- Additional disallowed entities from continuity: {continuity_state.disallowed_entities}
 - continuity_inputs and continuity_outputs are planning constraints, not prose lines.
 - Never quote or lightly paraphrase them as narration.
 - If a required entity is abstract, realize it naturally in action, implication, or dialogue rather than quoting the scene-card wording.
+- If a required entity names a file, form, memo, notice, or request, state that label plainly on-page at least once.
 - Use the sensory_anchor as grounding, not as a line to be copied verbatim.
 - Realize the subtext_engine indirectly; do not explain it.
 - Surface the POV character's desire and fear within the first 250 words through action or choice, not later explanation.
 - The POV character must withhold, misdirect, or pay an interpersonal price on-page; if the scene can be paraphrased as competent analysis, it is under-dramatized.
+- If Elena appears, someone must refuse, withdraw, or fail the relationship on-page.
+- If Marta appears, the field of suspicion must narrow, harden, or become more dangerous by the end.
+- The closing choice must land as consequence, not thematic summary.
 
 Avoid:
 - Plot-summary paragraphs.
 - Dialogue that exists only to explain what both characters already know.
 - Generic threat language, repeated emotional shorthand, filler beats, or fake introspection.
 - Scenes that stay technically competent but emotionally inert.
+- Investigation scenes that stack more than two representative examples before the decisive clue or file lands.
+- Long synthesis after the decisive clue lands; move quickly from recognition to visible decision.
+- Two consecutive explanatory paragraphs unless the second one changes the power balance.
 - Endings that dissolve into reflection when the scene card requires a sharper landing.
 - Lifting scene-card phrasing verbatim into dialogue or narration.
 - Bullet lists, headings, numbered rules, or notebook-style outline formatting inside the prose scene.
 
+Story brief:
+{story_brief}
+
+Relevant chapter brief:
+{chapter_brief}
+
+Current continuity brief:
+{continuity_brief}
+
 Recent approved scene summaries:
 {summaries_block}
-
-StorySpec:
-{serialise_model(story_spec)}
-
-Relevant chapter plan:
-{serialise_model(chapter_plan)}
-
-Current continuity state:
-{serialise_model(continuity_state)}
 
 Rewrite brief:
 {rewrite_block}
@@ -344,11 +364,12 @@ def scene_qa_system_prompt(story_spec: StorySpec) -> str:
     return (
         f"{global_prose_policy(audience=story_spec.audience, rating_ceiling=story_spec.rating_ceiling, market_position=story_spec.subgenre or story_spec.genre)}\n\n"
         "Judge one drafted scene for a strict production pipeline.\n"
-        "Score continuity, engagement, voice, pacing, specificity, prose freshness, and emotional movement "
+        "Score continuity, engagement, voice, pacing, specificity, prose freshness, emotional movement, subtext, concealment, leverage shift, relationship cost, and commercial hook "
         "from 1 to 5, where 5 is best.\n"
         "Score ai_smell_score from 1 to 5, where 1 means low AI-smell risk and 5 means high AI-smell risk.\n"
         "Fail any scene with a real continuity break, filler function, weak ending against the scene card, "
-        "mechanical exposition, missing required entities, forbidden entity usage, flat subtext, or pressure that does not materially move.\n"
+        "mechanical exposition, missing required entities, forbidden entity usage, flat subtext, hidden pressure that never bites on-page, no real leverage movement, or pressure that does not materially move.\n"
+        "Fail scenes that can be accurately paraphrased as competent analysis rather than live drama.\n"
         "The rewrite_brief must be operational and specific."
     )
 
@@ -378,6 +399,90 @@ Deterministic validation report:
 
 Drafted scene:
 {scene_text}
+""".strip()
+
+
+def chapter_qa_system_prompt(story_spec: StorySpec) -> str:
+    """Returns the system prompt for chapter-level QA."""
+    return (
+        f"{global_prose_policy(audience=story_spec.audience, rating_ceiling=story_spec.rating_ceiling, market_position=story_spec.subgenre or story_spec.genre)}\n\n"
+        "Judge one assembled chapter with a commercial-thriller editorial mindset.\n"
+        "Score suspense, emotional voltage, clarity, and ending drive from 1 to 5, where 5 is best.\n"
+        "Fail chapters that feel connective, over-explanatory, or insufficiently dangerous, or whose final pages do not create forward pressure.\n"
+        "If the chapter fails, propose the minimum scene-level repairs required."
+    )
+
+
+def chapter_qa_user_prompt(
+    story_spec: StorySpec,
+    outline: Outline,
+    chapter_number: int,
+    chapter_text: str,
+    scene_cards: Iterable[SceneCard],
+) -> str:
+    """Builds the prompt for chapter-level QA."""
+    relevant_scene_cards = [scene for scene in scene_cards if scene.chapter_number == chapter_number]
+    return f"""
+Evaluate this assembled chapter.
+
+Requirements:
+- Penalize chapters that explain system dynamics well but do not intensify pursuit, intimacy, leverage, or consequence.
+- Penalize chapters whose ending settles into theme rather than propulsion.
+- Keep repair_targets minimal and scene-specific.
+
+StorySpec:
+{serialise_model(story_spec)}
+
+Outline:
+{serialise_model(outline)}
+
+Relevant scene cards:
+{serialise_model([scene.model_dump() for scene in relevant_scene_cards])}
+
+Chapter text:
+{chapter_text}
+""".strip()
+
+
+def arc_qa_system_prompt(story_spec: StorySpec) -> str:
+    """Returns the system prompt for targeted arc QA."""
+    return (
+        f"{global_prose_policy(audience=story_spec.audience, rating_ceiling=story_spec.rating_ceiling, market_position=story_spec.subgenre or story_spec.genre)}\n\n"
+        "Judge one targeted arc slice of the manuscript.\n"
+        "Score propulsion, pressure, relationship movement, and payoff readiness from 1 to 5, where 5 is best.\n"
+        "Fail arc slices that flatten into intelligent summary, lose pursuit, or stop compounding human cost.\n"
+        "If the arc fails, propose the minimum scene-level repairs required."
+    )
+
+
+def arc_qa_user_prompt(
+    story_spec: StorySpec,
+    outline: Outline,
+    arc_name: str,
+    arc_focus: str,
+    scene_numbers: list[int],
+    arc_text: str,
+) -> str:
+    """Builds the prompt for targeted arc QA."""
+    return f"""
+Evaluate the manuscript slice named "{arc_name}".
+
+Focus:
+- {arc_focus}
+- Penalize slices that are coherent but emotionally anesthetized.
+- Keep repair_targets minimal and scene-specific.
+
+StorySpec:
+{serialise_model(story_spec)}
+
+Outline:
+{serialise_model(outline)}
+
+Scene numbers in this arc:
+{scene_numbers}
+
+Arc text:
+{arc_text}
 """.strip()
 
 

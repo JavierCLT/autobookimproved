@@ -23,7 +23,7 @@ from novel_factory.schemas import (
     SceneCardCollection,
     StorySpec,
 )
-from novel_factory.utils import get_chapter_plan
+from novel_factory.utils import get_chapter_plan, truncate_text
 
 
 class NovelGenerator:
@@ -141,13 +141,16 @@ class NovelGenerator:
         """Drafts or rewrites a scene in prose."""
 
         is_rewrite = rewrite_brief is not None or current_draft is not None
+        story_brief = self._build_story_brief(story_spec)
+        chapter_brief = self._build_chapter_brief(outline, scene_card)
+        continuity_brief = self._build_continuity_brief(continuity_state)
         return self.llm.text(
             system_prompt=scene_draft_system_prompt(story_spec),
             user_prompt=scene_draft_user_prompt(
-                story_spec=story_spec,
-                outline=outline,
+                story_brief=story_brief,
+                chapter_brief=chapter_brief,
                 scene_card=scene_card,
-                continuity_state=continuity_state,
+                continuity_brief=continuity_brief,
                 recent_scene_summaries=recent_scene_summaries,
                 rewrite_brief=rewrite_brief,
                 current_draft=current_draft,
@@ -178,6 +181,7 @@ class NovelGenerator:
 
         open_threads_to_add = self._merge_candidate_updates(
             [
+                scene_card.counterforce_trace,
                 scene_card.revelation_or_shift,
                 scene_card.pressure_source,
                 scene_card.secret_pressure,
@@ -227,7 +231,7 @@ class NovelGenerator:
         evidence_to_add = self._extract_evidence_like_items(
             scene_card.required_entities
             + scene_card.continuity_outputs
-            + [scene_card.sensory_anchor]
+            + [scene_card.sensory_anchor, scene_card.counterforce_trace]
         )
 
         promises_to_add = self._select_matching_lines(
@@ -490,6 +494,66 @@ class NovelGenerator:
 
         summary = (
             f"{scene_card.pov_character} in {scene_card.location} pursues {scene_card.scene_desire}; "
-            f"{scene_card.power_shift.lower()} after {scene_card.revelation_or_shift.lower()}."
+            f"{scene_card.power_shift.lower()} after {scene_card.closing_choice.lower()}."
         )
         return re.sub(r"\s+", " ", summary).strip()[:220]
+
+    def _build_story_brief(self, story_spec: StorySpec) -> str:
+        """Builds a compact drafting brief from the locked story contract."""
+
+        cast_lines = [
+            f"- {character.name}: {character.role}; needs {character.private_need}; fears {character.fear}."
+            for character in story_spec.cast[:6]
+        ]
+        style_lines = list(dict.fromkeys(story_spec.style_guide.prose_traits[:4] + story_spec.style_guide.banned_tells[:3]))
+        parts = [
+            f"Title: {story_spec.title_working}",
+            f"Promise: {story_spec.one_sentence_promise}",
+            f"Premise core: {story_spec.premise_core}",
+            f"Emotional engine: {story_spec.emotional_engine}",
+            f"Adversarial engine: {story_spec.adversarial_engine}",
+            f"Moral fault line: {story_spec.moral_fault_line}",
+            "Key cast:\n" + ("\n".join(cast_lines) if cast_lines else "- None specified"),
+            "Style guardrails:\n" + ("\n".join(f"- {line}" for line in style_lines) if style_lines else "- Keep pressure specific and readable."),
+        ]
+        return "\n".join(parts)
+
+    def _build_chapter_brief(self, outline: Outline, scene_card: SceneCard) -> str:
+        """Builds a compact drafting brief for the current chapter."""
+
+        chapter_plan = get_chapter_plan(outline, scene_card.chapter_number)
+        beat_lines = [
+            f"- Beat {beat.slot_number}: {beat.beat_summary} ({beat.purpose})"
+            for beat in chapter_plan.scenes[:4]
+        ]
+        parts = [
+            f"Chapter purpose: {chapter_plan.purpose}",
+            f"Chapter target words: {chapter_plan.target_words}",
+            "Chapter beats:\n" + ("\n".join(beat_lines) if beat_lines else "- No chapter beats provided."),
+        ]
+        return "\n".join(parts)
+
+    def _build_continuity_brief(self, continuity_state: ContinuityState) -> str:
+        """Builds a compact continuity brief for prose drafting."""
+
+        def block(title: str, lines: list[str], *, limit: int) -> str:
+            trimmed = [truncate_text(line, 180) for line in lines[-limit:] if line.strip()]
+            if not trimmed:
+                return f"{title}:\n- None"
+            return f"{title}:\n" + "\n".join(f"- {line}" for line in trimmed)
+
+        parts = [
+            f"Current day: {continuity_state.current_day}",
+            f"Current location: {continuity_state.current_location}",
+            block("Known facts", continuity_state.known_facts, limit=6),
+            block("Open threads", continuity_state.open_threads, limit=6),
+            block("Relationship state", continuity_state.relationship_state, limit=5),
+            block("Suspicion state", continuity_state.suspicion_state, limit=5),
+            block("Leverage state", continuity_state.leverage_state, limit=5),
+            block("Moral lines crossed", continuity_state.moral_lines_crossed, limit=4),
+            block("Costs already in play", continuity_state.injuries_or_costs, limit=4),
+            block("Evidence or objects", continuity_state.evidence_or_objects, limit=5),
+            block("Unresolved promises", continuity_state.unresolved_promises, limit=4),
+            block("Disallowed entities", continuity_state.disallowed_entities, limit=4),
+        ]
+        return "\n".join(parts)

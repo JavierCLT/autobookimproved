@@ -5,12 +5,18 @@ from __future__ import annotations
 from novel_factory.config import AppConfig
 from novel_factory.llm import OpenAIResponsesClient
 from novel_factory.prompts import (
+    arc_qa_system_prompt,
+    arc_qa_user_prompt,
+    chapter_qa_system_prompt,
+    chapter_qa_user_prompt,
     global_qa_system_prompt,
     global_qa_user_prompt,
     scene_qa_system_prompt,
     scene_qa_user_prompt,
 )
 from novel_factory.schemas import (
+    ArcQaReport,
+    ChapterQaReport,
     ContinuityState,
     DeterministicValidationReport,
     GlobalQaReport,
@@ -85,5 +91,63 @@ class GlobalJudge:
             reasoning_effort=self.config.reasoning.global_qa,
             temperature=self.config.global_qa_temperature,
             max_output_tokens=3_500,
+            verbosity="low",
+        )
+
+    def judge_chapter(
+        self,
+        *,
+        story_spec: StorySpec,
+        outline: Outline,
+        chapter_number: int,
+        chapter_text: str,
+        scene_cards: list[SceneCard],
+    ) -> ChapterQaReport:
+        """Scores one assembled chapter."""
+
+        return self.llm.structured(
+            system_prompt=chapter_qa_system_prompt(story_spec),
+            user_prompt=chapter_qa_user_prompt(
+                story_spec=story_spec,
+                outline=outline,
+                chapter_number=chapter_number,
+                chapter_text=chapter_text,
+                scene_cards=scene_cards,
+            ),
+            schema=ChapterQaReport,
+            task_name=f"chapter_qa_{chapter_number:02d}",
+            reasoning_effort=self.config.reasoning.qa,
+            temperature=self.config.qa_temperature,
+            max_output_tokens=2_000,
+            verbosity="low",
+        )
+
+    def judge_arc(
+        self,
+        *,
+        story_spec: StorySpec,
+        outline: Outline,
+        arc_name: str,
+        arc_focus: str,
+        scene_numbers: list[int],
+        arc_text: str,
+    ) -> ArcQaReport:
+        """Scores one targeted manuscript slice."""
+
+        return self.llm.structured(
+            system_prompt=arc_qa_system_prompt(story_spec),
+            user_prompt=arc_qa_user_prompt(
+                story_spec=story_spec,
+                outline=outline,
+                arc_name=arc_name,
+                arc_focus=arc_focus,
+                scene_numbers=scene_numbers,
+                arc_text=arc_text,
+            ),
+            schema=ArcQaReport,
+            task_name=f"arc_qa_{arc_name}",
+            reasoning_effort=self.config.reasoning.qa,
+            temperature=self.config.qa_temperature,
+            max_output_tokens=2_000,
             verbosity="low",
         )
