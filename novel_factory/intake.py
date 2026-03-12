@@ -115,6 +115,7 @@ STATIC_ALLOWED_KEYS = {
     "secondary_sales_category",
     "what_it_should_feel_like_in_the_market",
     "what_it_must_not_feel_like",
+    "reference_passages",
     "synopsis",
     "notes_to_codex",
 }
@@ -358,6 +359,10 @@ def build_planning_guidance(intake: BookIntake | None, *, max_chars: int = 14_00
             ),
         ),
         (
+            "Voice references",
+            _join_fields(intake, "reference_passages"),
+        ),
+        (
             "Continuity and notes",
             _join_fields(
                 intake,
@@ -434,11 +439,18 @@ def build_drafting_guidance(intake: BookIntake | None, *, max_chars: int = 5_000
                 intake,
                 "must_have_images_or_motifs",
                 "continuity_rules",
+                "reference_passages",
                 "notes_to_codex",
             ),
         ),
     ]
     return truncate_text(_render_sections(sections), max_chars)
+
+
+def get_reference_passages(intake: BookIntake | None) -> str:
+    """Returns optional reference passages used for voice calibration."""
+
+    return get_field(intake, "reference_passages")
 
 
 def _join_fields(intake: BookIntake, *keys: str) -> str:

@@ -114,6 +114,50 @@ class EditorialBlueprint(ArtifactModel):
     ending_payoffs: List[str] = Field(default_factory=list)
 
 
+class VoiceDNA(ArtifactModel):
+    """Compact prose fingerprint extracted from optional reference passages."""
+
+    vocabulary_register: str
+    rhythm_signature: str
+    characteristic_techniques: List[str] = Field(default_factory=list)
+    avoid_patterns: List[str] = Field(default_factory=list)
+    sample_paragraph: str
+
+
+class PlantPayoff(ArtifactModel):
+    """One foreshadowing seed and payoff pair."""
+
+    element: str
+    plant_scene: int
+    payoff_scene: int
+    subtlety_level: str
+    plant_method: str
+    payoff_method: str
+
+
+class PlantPayoffMap(ArtifactModel):
+    """Registry of foreshadowing elements across the manuscript."""
+
+    entries: List[PlantPayoff] = Field(default_factory=list)
+
+
+class SubplotArc(ArtifactModel):
+    """One subplot threaded across the manuscript."""
+
+    subplot_name: str
+    subplot_type: str
+    description: str
+    scene_appearances: List[int] = Field(default_factory=list)
+    arc_shape: str
+    intersection_with_main_plot: str
+
+
+class SubplotWeaveMap(ArtifactModel):
+    """Registry of subplot arcs and where they surface."""
+
+    subplots: List[SubplotArc] = Field(default_factory=list)
+
+
 class SceneCard(ArtifactModel):
     """Locked scene contract for drafting."""
 
@@ -150,6 +194,9 @@ class SceneCard(ArtifactModel):
     continuity_outputs: List[str] = Field(default_factory=list)
     required_entities: List[str] = Field(default_factory=list)
     forbidden_entities: List[str] = Field(default_factory=list)
+    plants_in_scene: List[str] = Field(default_factory=list)
+    payoffs_in_scene: List[str] = Field(default_factory=list)
+    subplot_turns: List[str] = Field(default_factory=list)
 
     ending_mode: str
     target_words: int
@@ -166,6 +213,7 @@ class ContinuityState(ArtifactModel):
 
     current_day: str
     current_location: str
+    character_locations: Dict[str, str] = Field(default_factory=dict)
     known_facts: List[str] = Field(default_factory=list)
     open_threads: List[str] = Field(default_factory=list)
     relationship_state: List[str] = Field(default_factory=list)
@@ -175,6 +223,9 @@ class ContinuityState(ArtifactModel):
     injuries_or_costs: List[str] = Field(default_factory=list)
     evidence_or_objects: List[str] = Field(default_factory=list)
     unresolved_promises: List[str] = Field(default_factory=list)
+    active_promises: List[str] = Field(default_factory=list)
+    character_knowledge: Dict[str, List[str]] = Field(default_factory=dict)
+    emotional_states: Dict[str, str] = Field(default_factory=dict)
     disallowed_entities: List[str] = Field(default_factory=list)
     recent_scene_summaries: List[str] = Field(default_factory=list)
     last_approved_scene_number: int = 0
@@ -185,6 +236,7 @@ class ContinuityUpdate(ArtifactModel):
 
     current_day: str
     current_location: str
+    character_locations_to_update: Dict[str, str] = Field(default_factory=dict)
     facts_to_add: List[str] = Field(default_factory=list)
     open_threads_to_add: List[str] = Field(default_factory=list)
     open_threads_to_close: List[str] = Field(default_factory=list)
@@ -196,6 +248,10 @@ class ContinuityUpdate(ArtifactModel):
     evidence_or_objects_to_add: List[str] = Field(default_factory=list)
     unresolved_promises_to_add: List[str] = Field(default_factory=list)
     unresolved_promises_to_close: List[str] = Field(default_factory=list)
+    active_promises_to_add: List[str] = Field(default_factory=list)
+    active_promises_to_close: List[str] = Field(default_factory=list)
+    character_knowledge_to_add: Dict[str, List[str]] = Field(default_factory=dict)
+    emotional_states_to_update: Dict[str, str] = Field(default_factory=dict)
     disallowed_entities_to_add: List[str] = Field(default_factory=list)
     recent_scene_summary: str
 
@@ -303,6 +359,42 @@ class GlobalQaReport(ArtifactModel):
     ai_smell_score: int = Field(ge=1, le=5)
     major_problems: List[str] = Field(default_factory=list)
     repair_targets: List[RepairTarget] = Field(default_factory=list)
+
+
+class ColdReaderReport(ArtifactModel):
+    """Reader-experience report produced without planning context."""
+
+    confusion_points: List[str] = Field(default_factory=list)
+    predictable_moments: List[str] = Field(default_factory=list)
+    engagement_drops: List[str] = Field(default_factory=list)
+    character_tracking_issues: List[str] = Field(default_factory=list)
+    emotional_peaks: List[str] = Field(default_factory=list)
+    unanswered_questions: List[str] = Field(default_factory=list)
+    overall_impression: str
+    would_keep_reading: bool
+    standout_scenes: List[int] = Field(default_factory=list)
+    weakest_scenes: List[int] = Field(default_factory=list)
+    overall_score: int = Field(ge=1, le=10)
+
+
+class ScenePacingData(ArtifactModel):
+    """One scene's position on the manuscript tension curve."""
+
+    scene_number: int
+    tension_level: int = Field(ge=1, le=10)
+    stakes_level: int = Field(ge=1, le=10)
+    action_density: int = Field(ge=1, le=10)
+    emotional_intensity: int = Field(ge=1, le=10)
+
+
+class PacingAnalysis(ArtifactModel):
+    """Tension-curve report for the full manuscript."""
+
+    scene_data: List[ScenePacingData] = Field(default_factory=list)
+    tension_sags: List[str] = Field(default_factory=list)
+    fatigue_zones: List[str] = Field(default_factory=list)
+    pacing_verdict: str
+    recommendations: List[str] = Field(default_factory=list)
 
 
 class BookIntake(ArtifactModel):

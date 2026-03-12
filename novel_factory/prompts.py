@@ -5,14 +5,18 @@ from __future__ import annotations
 from typing import Iterable, Optional
 
 from novel_factory.schemas import (
+    ColdReaderReport,
     ContinuityState,
     ContinuityUpdate,
     DeterministicValidationReport,
     EditorialBlueprint,
     GlobalQaReport,
     Outline,
+    PacingAnalysis,
+    PlantPayoffMap,
     SceneCard,
     StorySpec,
+    SubplotWeaveMap,
 )
 from novel_factory.utils import serialise_model
 
@@ -76,6 +80,38 @@ def planning_system_prompt(
     )
 
 
+def voice_calibration_system_prompt() -> str:
+    """Returns the system prompt for extracting a compact voice fingerprint."""
+
+    return (
+        "You are a prose-style forensic analyst.\n"
+        "Extract concrete, reproducible voice characteristics from reference passages without imitating any living author.\n"
+        "Return only schema-compatible content."
+    )
+
+
+def voice_calibration_user_prompt(*, reference_passages: str, genre: str, audience: str) -> str:
+    """Builds the user prompt for voice calibration."""
+
+    return f"""
+Analyze these reference passages and extract a compact VoiceDNA profile.
+
+Requirements:
+- vocabulary_register should describe diction and register precisely.
+- rhythm_signature should describe sentence cadence and paragraph movement in operational terms.
+- characteristic_techniques should list 4-8 techniques the draft can emulate safely at a craft level.
+- avoid_patterns should list 4-8 habits the draft should avoid because they would flatten or cheapen the voice.
+- sample_paragraph should be an original paragraph in the calibrated spirit, not a paraphrase of the reference.
+- Do not name or imitate living authors.
+
+Genre: {genre}
+Audience: {audience}
+
+Reference passages:
+{reference_passages}
+""".strip()
+
+
 def story_spec_user_prompt(
     synopsis: str,
     target_words: int,
@@ -85,11 +121,17 @@ def story_spec_user_prompt(
     rating_ceiling: str,
     market_position: str,
     intake_guidance: str | None = None,
+    voice_dna_summary: str | None = None,
 ) -> str:
     """Builds the story-spec prompt."""
     intake_block = (
         f"\n\nBook intake guidance:\n{intake_guidance}"
         if intake_guidance
+        else ""
+    )
+    voice_block = (
+        f"\n\nOptional voice DNA:\n{voice_dna_summary}"
+        if voice_dna_summary
         else ""
     )
     return f"""
@@ -112,12 +154,15 @@ Requirements:
 - Put explicit audience-appropriate bans in banned_content.
 - Continuity rules should be operational and testable later.
 - The one_sentence_promise should sell both the external thriller engine and the intimate personal cost.
+- If voice DNA is provided, translate it into safe craft constraints rather than imitation.
 - If the book intake guidance supplies explicit values, scene obligations, rituals, style bans, or continuity rules, treat them as higher-priority constraints than inference from synopsis alone unless they conflict with safety or schema compatibility.
 
 Synopsis:
 {synopsis}
 
 {intake_block}
+
+{voice_block}
 """.strip()
 
 
@@ -159,6 +204,111 @@ StorySpec:
 
 Synopsis:
 {synopsis}
+
+{intake_block}
+""".strip()
+
+
+def plant_payoff_system_prompt(
+    *,
+    audience: str,
+    rating_ceiling: str,
+    market_position: str,
+) -> str:
+    """Returns the system prompt for plant/payoff planning."""
+
+    return (
+        f"{global_prose_policy(audience=audience, rating_ceiling=rating_ceiling, market_position=market_position)}\n\n"
+        "You are designing foreshadowing architecture for a novel.\n"
+        "Every plant must feel natural in-scene and every payoff must feel inevitable in retrospect.\n"
+        "Return only schema-compatible content."
+    )
+
+
+def plant_payoff_user_prompt(
+    story_spec: StorySpec,
+    editorial_blueprint: EditorialBlueprint,
+    outline: Outline,
+    intake_guidance: str | None = None,
+) -> str:
+    """Builds the prompt for the plant/payoff registry."""
+
+    intake_block = (
+        f"\n\nBook intake guidance:\n{intake_guidance}"
+        if intake_guidance
+        else ""
+    )
+    return f"""
+Create a PlantPayoffMap for this novel.
+
+Requirements:
+- Create 6-14 entries.
+- Plants can be objects, rituals, procedural details, lies, habits, wounds, promises, or lines of dialogue.
+- Each plant_scene must come before its payoff_scene.
+- At least 3 entries should span more than 4 scenes between plant and payoff.
+- At least 2 entries should support the ending payoffs from the EditorialBlueprint.
+- plant_method and payoff_method must explain how the beat feels natural, not mechanical.
+
+StorySpec:
+{serialise_model(story_spec)}
+
+EditorialBlueprint:
+{serialise_model(editorial_blueprint)}
+
+Outline:
+{serialise_model(outline)}
+
+{intake_block}
+""".strip()
+
+
+def subplot_weave_system_prompt(
+    *,
+    audience: str,
+    rating_ceiling: str,
+    market_position: str,
+) -> str:
+    """Returns the system prompt for subplot planning."""
+
+    return (
+        f"{global_prose_policy(audience=audience, rating_ceiling=rating_ceiling, market_position=market_position)}\n\n"
+        "You are designing subplot architecture for a novel.\n"
+        "Each subplot must pressure the protagonist's core dilemma rather than run beside it decoratively.\n"
+        "Return only schema-compatible content."
+    )
+
+
+def subplot_weave_user_prompt(
+    story_spec: StorySpec,
+    editorial_blueprint: EditorialBlueprint,
+    outline: Outline,
+    intake_guidance: str | None = None,
+) -> str:
+    """Builds the prompt for the subplot weave registry."""
+
+    intake_block = (
+        f"\n\nBook intake guidance:\n{intake_guidance}"
+        if intake_guidance
+        else ""
+    )
+    return f"""
+Create a SubplotWeaveMap for this novel.
+
+Requirements:
+- Create 2-4 subplots.
+- Each subplot must appear in at least 3 scenes.
+- No subplot should go dormant for more than 6 consecutive scenes unless it is intentionally buried for payoff.
+- Each subplot must intersect the main plot through pressure, temptation, concealment, leverage, or cost.
+- At least one subplot should materially complicate the final third.
+
+StorySpec:
+{serialise_model(story_spec)}
+
+EditorialBlueprint:
+{serialise_model(editorial_blueprint)}
+
+Outline:
+{serialise_model(outline)}
 
 {intake_block}
 """.strip()
@@ -209,12 +359,24 @@ def scene_cards_user_prompt(
     story_spec: StorySpec,
     outline: Outline,
     editorial_blueprint: EditorialBlueprint,
+    plant_payoff_map: PlantPayoffMap | None = None,
+    subplot_weave_map: SubplotWeaveMap | None = None,
     intake_guidance: str | None = None,
 ) -> str:
     """Builds the scene-card prompt."""
     intake_block = (
         f"\n\nBook intake guidance:\n{intake_guidance}"
         if intake_guidance
+        else ""
+    )
+    plant_block = (
+        f"\n\nPlantPayoffMap:\n{serialise_model(plant_payoff_map)}"
+        if plant_payoff_map is not None
+        else ""
+    )
+    subplot_block = (
+        f"\n\nSubplotWeaveMap:\n{serialise_model(subplot_weave_map)}"
+        if subplot_weave_map is not None
         else ""
     )
     return f"""
@@ -245,6 +407,9 @@ Requirements:
 - Forbidden entities should list people, objects, or facts that must not appear in the scene.
 - continuity_inputs should specify what prior facts the drafter must preserve.
 - continuity_outputs should specify what new facts the continuity tracker must record.
+- plants_in_scene should list the foreshadowing seeds that belong here.
+- payoffs_in_scene should list the earlier plants that cash here.
+- subplot_turns should list which subplot beats advance here.
 - At least one meaningful thing must worsen, tighten, or become harder by the end of each scene.
 - Every 2-3 scenes, at least one ladder beat from the EditorialBlueprint must intensify. If no ladder advances, the scene is probably decorative and should be cut or merged.
 - By scene 6 at latest, the counterforce must leave an on-page trace, rumor, memo, review footprint, or other concrete shadow.
@@ -261,6 +426,10 @@ Outline:
 
 EditorialBlueprint:
 {serialise_model(editorial_blueprint)}
+
+{plant_block}
+
+{subplot_block}
 
 Synopsis:
 {synopsis}
@@ -287,9 +456,13 @@ Requirements:
 - Set only facts that are already locked by the story contract and outline.
 - Keep known_facts concise and operational.
 - open_threads should hold active unanswered pressures the novel must later resolve.
+- character_locations should identify where major characters are before scene 1 when already known.
 - relationship_state should be a compact list of relationship status lines describing the current status of important bonds.
 - suspicion_state should identify who currently suspects what, if anything.
 - leverage_state should identify who currently holds power over whom.
+- character_knowledge should identify what major characters already know before scene 1.
+- emotional_states should identify the dominant current emotional weather for major characters when already locked.
+- active_promises should hold narrative promises already made to the reader by premise or opening contract.
 - moral_lines_crossed should start empty unless the synopsis already locks in an irreversible compromise before scene 1.
 - disallowed_entities should include people or devices that must not appear before the outline introduces them.
 - recent_scene_summaries must be empty.
@@ -328,6 +501,7 @@ def scene_draft_user_prompt(
     scene_card: SceneCard,
     continuity_brief: str,
     recent_scene_summaries: Iterable[str],
+    voice_dna_summary: str | None = None,
     rewrite_brief: Optional[str] = None,
     current_draft: Optional[str] = None,
 ) -> str:
@@ -336,6 +510,7 @@ def scene_draft_user_prompt(
     rewrite_block = rewrite_brief or "None. Draft this cleanly on the first pass."
     current_draft_block = current_draft or "No prior draft."
     intake_block = f"\n\nIntake guidance:\n{intake_guidance}" if intake_guidance else ""
+    voice_block = f"\n\nVoice DNA:\n{voice_dna_summary}" if voice_dna_summary else ""
     relationship_line = (
         f"- If {editorial_blueprint.relationship_focus_name} appears, the relationship balance must change on-page through refusal, need, concealment, tenderness, or damage."
         if editorial_blueprint.relationship_focus_name.strip()
@@ -377,6 +552,9 @@ Scene must achieve:
 - Sensory anchor: {scene_card.sensory_anchor}
 - Ending mode: {scene_card.ending_mode}
 - Target words: about {scene_card.target_words}
+- Plants to embed: {scene_card.plants_in_scene}
+- Payoffs to cash: {scene_card.payoffs_in_scene}
+- Subplot turns to advance: {scene_card.subplot_turns}
 
 Continuity requirements:
 - Preserve these inputs: {scene_card.continuity_inputs}
@@ -388,6 +566,8 @@ Continuity requirements:
 - If a required entity is abstract, realize it naturally in action, implication, or dialogue rather than quoting the scene-card wording.
 - If a required entity names a file, form, memo, notice, or request, state that label plainly on-page at least once.
 - Use the sensory_anchor as grounding, not as a line to be copied verbatim.
+- Embed listed plants naturally so they serve the scene's immediate drama.
+- Land listed payoffs as consequence rather than explanatory callback.
 - Realize the subtext_engine indirectly; do not explain it.
 - Surface the POV character's desire and fear within the first 250 words through action or choice, not later explanation.
 - The POV character must withhold, misdirect, or pay an interpersonal price on-page; if the scene can be paraphrased as competent analysis, it is under-dramatized.
@@ -413,6 +593,8 @@ Story brief:
 
 Editorial blueprint:
 {serialise_model(editorial_blueprint)}
+
+{voice_block}
 
 {intake_block}
 
@@ -454,12 +636,16 @@ Create a compact ContinuityUpdate after the approved scene below.
 Requirements:
 - Return only deltas that should be merged into the prior continuity.
 - current_day and current_location must reflect the post-scene state.
+- character_locations_to_update should track location changes for characters whose locations are now explicit.
 - facts_to_add should contain only newly relevant facts.
 - open_threads_to_close should list threads explicitly resolved in this scene.
 - relationship_updates should be terse status lines.
 - suspicion_updates should be terse status lines naming who now suspects more or less, and of what.
 - leverage_updates should be terse status lines naming who now holds more or less power.
 - moral_lines_crossed_to_add should record irreversible ethical thresholds crossed on-page.
+- character_knowledge_to_add should track who learns what on-page.
+- emotional_states_to_update should track significant emotional-state changes.
+- active_promises_to_add and active_promises_to_close should track promises newly made or fulfilled for the reader.
 - recent_scene_summary must be one concise operational sentence, 30 words or fewer.
 - Do not invent off-page events.
 
@@ -633,6 +819,66 @@ def global_qa_system_prompt(story_spec: StorySpec) -> str:
     )
 
 
+def cold_reader_system_prompt(story_spec: StorySpec) -> str:
+    """Returns the system prompt for reading the manuscript without planning context."""
+
+    return (
+        f"{global_prose_policy(audience=story_spec.audience, rating_ceiling=story_spec.rating_ceiling, market_position=story_spec.subgenre or story_spec.genre)}\n\n"
+        "Read the manuscript cold, without relying on any planning context.\n"
+        "Report confusion, boredom, predictability, and strongest emotional peaks as an honest reader would.\n"
+        "Return only schema-compatible content."
+    )
+
+
+def cold_reader_user_prompt(manuscript_text: str) -> str:
+    """Builds the prompt for the cold-reader report."""
+
+    return f"""
+Read this manuscript cold as if you picked it up with no prior context.
+
+Requirements:
+- confusion_points should identify where reader tracking breaks.
+- predictable_moments should identify telegraphed reveals or turns.
+- engagement_drops should identify where a reader would be tempted to stop.
+- character_tracking_issues should identify forgettable, blurry, or inconsistent character handling.
+- emotional_peaks should identify where the manuscript hits hardest.
+- weakest_scenes should name the scenes most worth repairing first.
+- standout_scenes should name the scenes the manuscript should model more often.
+- overall_score uses a 1-10 scale.
+
+Manuscript:
+{manuscript_text}
+""".strip()
+
+
+def pacing_analysis_system_prompt(story_spec: StorySpec) -> str:
+    """Returns the system prompt for pacing analysis."""
+
+    return (
+        f"{global_prose_policy(audience=story_spec.audience, rating_ceiling=story_spec.rating_ceiling, market_position=story_spec.subgenre or story_spec.genre)}\n\n"
+        "Analyze the manuscript's pacing scene by scene.\n"
+        "Map the tension curve, identify sagging stretches and fatigue zones, and return only schema-compatible content."
+    )
+
+
+def pacing_analysis_user_prompt(manuscript_text: str, scene_count: int) -> str:
+    """Builds the prompt for the pacing analysis report."""
+
+    return f"""
+Analyze the pacing curve of this manuscript.
+
+Requirements:
+- Provide one ScenePacingData entry for each scene number from 1 to {scene_count}.
+- tension_level, stakes_level, action_density, and emotional_intensity use a 1-10 scale.
+- tension_sags should identify low-tension stretches that last too long.
+- fatigue_zones should identify stretches of sustained high intensity without enough modulation.
+- recommendations should be concrete and scene-oriented.
+
+Manuscript:
+{manuscript_text}
+""".strip()
+
+
 def global_qa_user_prompt(
     story_spec: StorySpec,
     outline: Outline,
@@ -676,10 +922,12 @@ def repair_scene_user_prompt(
     current_scene: str,
     global_qa_report: GlobalQaReport,
     rewrite_brief: str,
+    voice_dna_summary: str | None = None,
     intake_guidance: str | None = None,
 ) -> str:
     """Builds a scene repair prompt triggered by global QA."""
     intake_block = f"\n\nBook intake guidance:\n{intake_guidance}" if intake_guidance else ""
+    voice_block = f"\n\nCalibrated voice fingerprint:\n{voice_dna_summary}" if voice_dna_summary else ""
     return f"""
 Repair an approved scene with the minimum necessary changes.
 
@@ -714,6 +962,8 @@ Outline:
 
 StorySpec:
 {serialise_model(story_spec)}
+
+{voice_block}
 
 {intake_block}
 """.strip()

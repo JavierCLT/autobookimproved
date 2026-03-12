@@ -171,6 +171,9 @@ sensory_preferences:
 things_that_should_feel_hotter_or_sharper:
 things_that_should_feel_restrained:
 things_that_make_you_say_this_sounds_ai:
+reference_passages:
+
+If you want optional voice calibration, paste 1-3 short passages here that represent the prose energy, rhythm, or sentence behavior you want. Use material you are allowed to reference.
 
 ## 11. Content Boundaries
 

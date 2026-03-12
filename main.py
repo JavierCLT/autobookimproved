@@ -37,7 +37,7 @@ def bootstrap_command(
     synopsis_file: Path | None = typer.Option(None, exists=True, file_okay=True, dir_okay=False),
     intake_file: Path | None = typer.Option(None, exists=True, file_okay=True, dir_okay=False),
 ) -> None:
-    """Creates StorySpec, EditorialBlueprint, Outline, SceneCards, and initial continuity artifacts."""
+    """Creates planning artifacts including blueprint, weave maps, scene cards, and initial continuity."""
 
     _require_story_input(synopsis_file, intake_file)
     pipeline = build_pipeline()
@@ -76,7 +76,7 @@ def run_project_command(
 def global_qa_command(
     project: str = typer.Option(..., help="Project slug or label."),
 ) -> None:
-    """Runs manuscript-level QA on existing outputs."""
+    """Runs manuscript-level QA plus cold-reader and pacing-analysis passes on existing outputs."""
 
     pipeline = build_pipeline()
     report = pipeline.global_qa(project=project)
@@ -109,7 +109,7 @@ def editorial_qa_command(
 def repair_project_command(
     project: str = typer.Option(..., help="Project slug or label."),
 ) -> None:
-    """Applies targeted repairs from the last failed global QA pass."""
+    """Applies targeted repairs from the latest global, cold-reader, or pacing pass."""
 
     pipeline = build_pipeline()
     report = pipeline.repair_project(project=project)

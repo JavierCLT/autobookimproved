@@ -36,12 +36,15 @@ class OpenAIResponsesClient:
         reasoning_effort: str,
         temperature: float,
         max_output_tokens: int = 5_000,
+        model_override: str = "",
     ) -> str:
         """Generates free-form text with the Responses API."""
 
+        model = model_override or self.config.model
+
         def _request() -> str:
             request_kwargs = {
-                "model": self.config.model,
+                "model": model,
                 "instructions": system_prompt,
                 "input": user_prompt,
                 "reasoning": {"effort": reasoning_effort},
@@ -50,7 +53,7 @@ class OpenAIResponsesClient:
                 "store": False,
                 "truncation": "auto",
             }
-            if self._supports_temperature():
+            if self._supports_temperature(model):
                 request_kwargs["temperature"] = temperature
 
             response = self.client.responses.create(
@@ -74,12 +77,15 @@ class OpenAIResponsesClient:
         temperature: float,
         max_output_tokens: int = 4_000,
         verbosity: str = "medium",
+        model_override: str = "",
     ) -> SchemaT:
         """Generates structured output and parses it into a Pydantic model."""
 
+        model = model_override or self.config.model
+
         def _request() -> SchemaT:
             request_kwargs = {
-                "model": self.config.model,
+                "model": model,
                 "instructions": system_prompt,
                 "input": user_prompt,
                 "text_format": schema,
@@ -90,7 +96,7 @@ class OpenAIResponsesClient:
                 "store": False,
                 "truncation": "auto",
             }
-            if self._supports_temperature():
+            if self._supports_temperature(model):
                 request_kwargs["temperature"] = temperature
 
             try:
@@ -114,6 +120,7 @@ class OpenAIResponsesClient:
                     temperature=temperature,
                     max_output_tokens=max(max_output_tokens, 5_000),
                     verbosity=verbosity,
+                    model=model,
                 )
 
         return self._with_retries(task_name=task_name, callback=_request)
@@ -129,6 +136,7 @@ class OpenAIResponsesClient:
         temperature: float,
         max_output_tokens: int,
         verbosity: str,
+        model: str,
     ) -> SchemaT:
         """Retries a structured task with JSON-only output and local validation."""
 
@@ -140,7 +148,7 @@ class OpenAIResponsesClient:
             f"JSON schema:\n{schema_json}"
         )
         request_kwargs = {
-            "model": self.config.model,
+            "model": model,
             "instructions": f"{system_prompt}\n\nReturn only a valid JSON object with no surrounding prose.",
             "input": fallback_input,
             "reasoning": {"effort": reasoning_effort},
@@ -150,7 +158,7 @@ class OpenAIResponsesClient:
             "store": False,
             "truncation": "auto",
         }
-        if self._supports_temperature():
+        if self._supports_temperature(model):
             request_kwargs["temperature"] = temperature
 
         response = self.client.responses.create(**request_kwargs)
@@ -186,10 +194,10 @@ class OpenAIResponsesClient:
 
         raise LlmRequestError(f"LLM task '{task_name}' failed after {attempts} attempts.") from last_error
 
-    def _supports_temperature(self) -> bool:
+    def _supports_temperature(self, model: str) -> bool:
         """Returns whether the configured model accepts sampling temperature."""
 
-        return not self.config.model.lower().startswith("gpt-5")
+        return not model.lower().startswith("gpt-5")
 
     def _extract_json_object(self, text: str) -> str:
         """Extracts a JSON object from a response that may include wrapper text."""

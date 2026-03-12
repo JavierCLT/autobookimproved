@@ -11,22 +11,27 @@ from typing import Callable
 from novel_factory.config import AppConfig
 from novel_factory.generators import NovelGenerator
 from novel_factory.intake import parse_book_intake
-from novel_factory.judges import GlobalJudge, SceneJudge
+from novel_factory.judges import ColdReaderJudge, GlobalJudge, PacingAnalyzer, SceneJudge
 from novel_factory.llm import OpenAIResponsesClient
 from novel_factory.schemas import (
     ArcQaReport,
     BookIntake,
     ChapterQaReport,
+    ColdReaderReport,
     ContinuityState,
     DeterministicValidationReport,
     EditorialBlueprint,
     GlobalQaReport,
     Outline,
+    PacingAnalysis,
+    PlantPayoffMap,
     RepairTarget,
     SceneCard,
     SceneCardCollection,
     SceneQaReport,
     StorySpec,
+    SubplotWeaveMap,
+    VoiceDNA,
 )
 from novel_factory.storage import RunStorage
 from novel_factory.utils import (
@@ -46,6 +51,16 @@ class SceneApprovalError(RuntimeError):
 
 
 @dataclass
+class SceneAttemptEvaluation:
+    """One evaluated scene draft candidate inside an attempt slot."""
+
+    scene_text: str
+    validation_report: DeterministicValidationReport
+    qa_report: SceneQaReport
+    candidate_number: int = 1
+
+
+@dataclass
 class ProjectArtifacts:
     """Loaded project state required by pipeline phases."""
 
@@ -53,6 +68,9 @@ class ProjectArtifacts:
     book_intake: BookIntake | None
     story_spec: StorySpec
     editorial_blueprint: EditorialBlueprint
+    voice_dna: VoiceDNA | None
+    plant_payoff_map: PlantPayoffMap | None
+    subplot_weave_map: SubplotWeaveMap | None
     outline: Outline
     scene_cards: list[SceneCard]
     continuity_state: ContinuityState
@@ -69,6 +87,8 @@ class NovelPipeline:
         self.validator = SceneValidator()
         self.scene_judge = SceneJudge(self.llm, config)
         self.global_judge = GlobalJudge(self.llm, config)
+        self.cold_reader = ColdReaderJudge(self.llm, config)
+        self.pacing_analyzer = PacingAnalyzer(self.llm, config)
 
     def bootstrap(
         self,
@@ -112,11 +132,25 @@ class NovelPipeline:
             },
         )
 
+        voice_dna: VoiceDNA | None = None
+        if storage.voice_dna_path.exists():
+            voice_dna = storage.load_model(storage.voice_dna_path, VoiceDNA)
+            logger.info("Loaded existing voice_dna.json")
+        else:
+            voice_dna = self.generators.calibrate_voice(book_intake, synopsis=synopsis_text)
+            if voice_dna is not None:
+                storage.save_model(storage.voice_dna_path, voice_dna)
+                storage.append_log("voice_dna_generated", {})
+
         if storage.story_spec_path.exists():
             story_spec = storage.load_model(storage.story_spec_path, StorySpec)
             logger.info("Loaded existing story_spec.json")
         else:
-            story_spec = self.generators.generate_story_spec(synopsis_text, book_intake=book_intake)
+            story_spec = self.generators.generate_story_spec(
+                synopsis_text,
+                book_intake=book_intake,
+                voice_dna=voice_dna,
+            )
             storage.save_model(storage.story_spec_path, story_spec)
             storage.append_log("story_spec_generated", {"title": story_spec.title_working})
 
@@ -148,6 +182,35 @@ class NovelPipeline:
             storage.save_model(storage.outline_path, outline)
             storage.append_log("outline_generated", {"chapters": len(outline.chapters)})
 
+        if storage.plant_payoff_map_path.exists():
+            plant_payoff_map = storage.load_model(storage.plant_payoff_map_path, PlantPayoffMap)
+            logger.info("Loaded existing plant_payoff_map.json")
+        else:
+            plant_payoff_map = self.generators.generate_plant_payoff_map(
+                story_spec,
+                editorial_blueprint,
+                outline,
+                book_intake=book_intake,
+            )
+            storage.save_model(storage.plant_payoff_map_path, plant_payoff_map)
+            storage.append_log("plant_payoff_map_generated", {"entries": len(plant_payoff_map.entries)})
+
+        if storage.subplot_weave_path.exists():
+            subplot_weave_map = storage.load_model(storage.subplot_weave_path, SubplotWeaveMap)
+            logger.info("Loaded existing subplot_weave_map.json")
+        else:
+            subplot_weave_map = self.generators.generate_subplot_weave(
+                story_spec,
+                editorial_blueprint,
+                outline,
+                book_intake=book_intake,
+            )
+            storage.save_model(storage.subplot_weave_path, subplot_weave_map)
+            storage.append_log(
+                "subplot_weave_generated",
+                {"subplots": len(subplot_weave_map.subplots)},
+            )
+
         if storage.scene_cards_path.exists():
             scene_cards = storage.load_model(storage.scene_cards_path, SceneCardCollection).scene_cards
             logger.info("Loaded existing scene_cards.json")
@@ -157,6 +220,8 @@ class NovelPipeline:
                 story_spec,
                 outline,
                 editorial_blueprint,
+                plant_payoff_map=plant_payoff_map,
+                subplot_weave_map=subplot_weave_map,
                 book_intake=book_intake,
             )
             storage.save_model(
@@ -179,6 +244,8 @@ class NovelPipeline:
         plan_report = self.plan_validator.validate(
             story_spec=story_spec,
             editorial_blueprint=editorial_blueprint,
+            plant_payoff_map=plant_payoff_map,
+            subplot_weave_map=subplot_weave_map,
             outline=outline,
             scene_cards=scene_cards,
             initial_continuity=initial_continuity,
@@ -198,7 +265,10 @@ class NovelPipeline:
             {
                 "story_spec_path": str(storage.story_spec_path),
                 "editorial_blueprint_path": str(storage.editorial_blueprint_path),
+                "voice_dna_path": str(storage.voice_dna_path) if voice_dna is not None else None,
                 "outline_path": str(storage.outline_path),
+                "plant_payoff_map_path": str(storage.plant_payoff_map_path),
+                "subplot_weave_map_path": str(storage.subplot_weave_path),
                 "scene_cards_path": str(storage.scene_cards_path),
             },
         )
@@ -237,6 +307,7 @@ class NovelPipeline:
                 scene_card=scene_card,
                 continuity_state=continuity_before,
                 recent_scene_summaries=self._recent_summaries(continuity_before),
+                voice_dna=artifacts.voice_dna,
                 book_intake=artifacts.book_intake,
                 rewrite_brief=rewrite_brief,
                 current_draft=current_draft,
@@ -284,7 +355,8 @@ class NovelPipeline:
         self.assemble_manuscript(project=project)
         self._run_editorial_qa(project=project)
         report = self.global_qa(project=project)
-        if report.pass_fail:
+        reader_targets = self._collect_reader_repair_targets(storage=storage, artifacts=artifacts)
+        if report.pass_fail and not reader_targets:
             return report
         repaired_report = self.repair_project(project=project)
         if not repaired_report.pass_fail:
@@ -336,8 +408,27 @@ class NovelPipeline:
             manuscript_text=manuscript_text,
             book_intake=artifacts.book_intake,
         )
+        cold_reader_report = self.cold_reader.judge(
+            story_spec=artifacts.story_spec,
+            manuscript_text=manuscript_text,
+        )
+        pacing_analysis = self.pacing_analyzer.analyze(
+            story_spec=artifacts.story_spec,
+            manuscript_text=manuscript_text,
+            scene_count=len(artifacts.scene_cards),
+        )
         storage.save_model(storage.global_qa_path, report)
-        storage.append_log("global_qa_completed", {"pass_fail": report.pass_fail})
+        storage.save_model(storage.cold_reader_path, cold_reader_report)
+        storage.save_model(storage.pacing_analysis_path, pacing_analysis)
+        storage.append_log(
+            "global_qa_completed",
+            {
+                "pass_fail": report.pass_fail,
+                "cold_reader_score": cold_reader_report.overall_score,
+                "weakest_scenes": cold_reader_report.weakest_scenes,
+                "pacing_recommendations": len(pacing_analysis.recommendations),
+            },
+        )
         return report
 
     def editorial_qa(self, *, project: str) -> None:
@@ -383,18 +474,30 @@ class NovelPipeline:
 
         storage = RunStorage(self.config, project)
         artifacts = self._load_project_artifacts(storage)
-        if storage.global_qa_path.exists():
+        if (
+            storage.global_qa_path.exists()
+            and storage.cold_reader_path.exists()
+            and storage.pacing_analysis_path.exists()
+        ):
             global_report = storage.load_model(storage.global_qa_path, GlobalQaReport)
         else:
             global_report = self.global_qa(project=project)
 
-        if global_report.pass_fail:
+        repair_targets = self._merge_repair_targets(
+            global_report.repair_targets,
+            self._collect_reader_repair_targets(storage=storage, artifacts=artifacts),
+        )
+        if global_report.pass_fail and not repair_targets:
             return global_report
-        if not global_report.repair_targets:
+        if not repair_targets:
             raise RuntimeError("Global QA failed without repair targets.")
+        repair_context_report = self._build_repair_context_report(
+            global_report=global_report,
+            repair_targets=repair_targets,
+        )
 
         seen_scene_numbers: set[int] = set()
-        for target in sorted(global_report.repair_targets, key=lambda item: item.scene_number):
+        for target in repair_targets:
             if target.scene_number in seen_scene_numbers:
                 continue
             seen_scene_numbers.add(target.scene_number)
@@ -422,8 +525,9 @@ class NovelPipeline:
                     scene_card=scene_card,
                     continuity_state=continuity_before,
                     current_scene=current_draft or current_scene,
-                    global_qa_report=global_report,
+                    global_qa_report=repair_context_report,
                     rewrite_brief=rewrite_brief or target.rewrite_brief,
+                    voice_dna=artifacts.voice_dna,
                     book_intake=artifacts.book_intake,
                 ),
                 initial_rewrite_brief=target.rewrite_brief,
@@ -510,37 +614,14 @@ class NovelPipeline:
     ) -> list[RepairTarget]:
         """Collapses chapter and arc repair targets into a minimal scene list."""
 
-        merged: dict[int, RepairTarget] = {}
+        targets: list[RepairTarget] = []
         for report in [*chapter_reports, *arc_reports]:
             if report.pass_fail:
                 continue
             if not report.repair_targets:
                 raise RuntimeError("Editorial QA failed without scene-level repair targets.")
-            for target in report.repair_targets:
-                existing = merged.get(target.scene_number)
-                if existing is None:
-                    merged[target.scene_number] = target
-                    continue
-                merged[target.scene_number] = RepairTarget(
-                    scene_number=target.scene_number,
-                    reason="; ".join(
-                        sorted(
-                            {
-                                existing.reason.strip(),
-                                target.reason.strip(),
-                            }
-                        )
-                    ),
-                    rewrite_brief="\n".join(
-                        dict.fromkeys(
-                            [
-                                existing.rewrite_brief.strip(),
-                                target.rewrite_brief.strip(),
-                            ]
-                        )
-                    ).strip(),
-                )
-        return [merged[number] for number in sorted(merged)]
+            targets.extend(report.repair_targets)
+        return self._merge_repair_targets(targets)
 
     def _apply_editorial_repair_targets(
         self,
@@ -593,6 +674,7 @@ class NovelPipeline:
                         repair_targets=[target],
                     ),
                     rewrite_brief=rewrite_brief or target.rewrite_brief,
+                    voice_dna=artifacts.voice_dna,
                     book_intake=artifacts.book_intake,
                 ),
                 initial_rewrite_brief=target.rewrite_brief,
@@ -625,6 +707,15 @@ class NovelPipeline:
 
         synopsis = storage.load_text(storage.synopsis_path).strip()
         story_spec = storage.load_model(storage.story_spec_path, StorySpec)
+        voice_dna: VoiceDNA | None = None
+        if storage.voice_dna_path.exists():
+            voice_dna = storage.load_model(storage.voice_dna_path, VoiceDNA)
+        else:
+            voice_dna = self.generators.calibrate_voice(book_intake, synopsis=synopsis)
+            if voice_dna is not None:
+                storage.save_model(storage.voice_dna_path, voice_dna)
+                storage.append_log("voice_dna_backfilled", {})
+
         if storage.editorial_blueprint_path.exists():
             editorial_blueprint = storage.load_model(storage.editorial_blueprint_path, EditorialBlueprint)
         else:
@@ -636,14 +727,92 @@ class NovelPipeline:
             storage.save_model(storage.editorial_blueprint_path, editorial_blueprint)
             storage.append_log("editorial_blueprint_backfilled", {})
 
+        if storage.outline_path.exists():
+            outline = storage.load_model(storage.outline_path, Outline)
+        else:
+            outline = self.generators.generate_outline(
+                synopsis,
+                story_spec,
+                editorial_blueprint,
+                book_intake=book_intake,
+            )
+            storage.save_model(storage.outline_path, outline)
+            storage.append_log("outline_backfilled", {"chapters": len(outline.chapters)})
+
+        if storage.plant_payoff_map_path.exists():
+            plant_payoff_map = storage.load_model(storage.plant_payoff_map_path, PlantPayoffMap)
+        else:
+            plant_payoff_map = self.generators.generate_plant_payoff_map(
+                story_spec,
+                editorial_blueprint,
+                outline,
+                book_intake=book_intake,
+            )
+            storage.save_model(storage.plant_payoff_map_path, plant_payoff_map)
+            storage.append_log(
+                "plant_payoff_map_backfilled",
+                {"entries": len(plant_payoff_map.entries)},
+            )
+
+        if storage.subplot_weave_path.exists():
+            subplot_weave_map = storage.load_model(storage.subplot_weave_path, SubplotWeaveMap)
+        else:
+            subplot_weave_map = self.generators.generate_subplot_weave(
+                story_spec,
+                editorial_blueprint,
+                outline,
+                book_intake=book_intake,
+            )
+            storage.save_model(storage.subplot_weave_path, subplot_weave_map)
+            storage.append_log(
+                "subplot_weave_backfilled",
+                {"subplots": len(subplot_weave_map.subplots)},
+            )
+
+        if storage.scene_cards_path.exists():
+            scene_cards = storage.load_model(storage.scene_cards_path, SceneCardCollection).scene_cards
+        else:
+            scene_cards = self.generators.generate_scene_cards(
+                synopsis,
+                story_spec,
+                outline,
+                editorial_blueprint,
+                plant_payoff_map=plant_payoff_map,
+                subplot_weave_map=subplot_weave_map,
+                book_intake=book_intake,
+            )
+            storage.save_model(storage.scene_cards_path, SceneCardCollection(scene_cards=scene_cards))
+            storage.append_log("scene_cards_backfilled", {"scenes": len(scene_cards)})
+
+        if storage.initial_continuity_path.exists():
+            initial_continuity = storage.load_model(storage.initial_continuity_path, ContinuityState)
+        else:
+            initial_continuity = self.generators.generate_initial_continuity(
+                story_spec,
+                outline,
+                book_intake=book_intake,
+            )
+            storage.save_model(storage.initial_continuity_path, initial_continuity)
+            storage.append_log("initial_continuity_backfilled", {})
+
+        if storage.continuity_path.exists():
+            continuity_state = storage.load_model(storage.continuity_path, ContinuityState)
+        else:
+            continuity_state = initial_continuity
+            storage.save_model(storage.continuity_path, continuity_state)
+            storage.append_log("continuity_state_backfilled", {})
+
         return ProjectArtifacts(
             synopsis=synopsis,
             book_intake=book_intake,
             story_spec=story_spec,
             editorial_blueprint=editorial_blueprint,
-            outline=storage.load_model(storage.outline_path, Outline),
-            scene_cards=storage.load_model(storage.scene_cards_path, SceneCardCollection).scene_cards,
-            continuity_state=storage.load_model(storage.continuity_path, ContinuityState),
+            voice_dna=voice_dna,
+            plant_payoff_map=plant_payoff_map,
+            subplot_weave_map=subplot_weave_map,
+            outline=outline,
+            scene_cards=scene_cards,
+            continuity_state=continuity_state,
         )
 
     def _recent_summaries(self, continuity_state: ContinuityState) -> list[str]:
@@ -769,12 +938,20 @@ class NovelPipeline:
         latest_validation: DeterministicValidationReport | None = None
 
         for attempt_number in range(0, self.config.max_scene_rewrites + 1):
-            scene_text = self._generate_scene_text(
+            evaluation = self._select_scene_attempt(
+                storage=storage,
+                story_spec=story_spec,
+                editorial_blueprint=editorial_blueprint,
+                book_intake=book_intake,
+                scene_card=scene_card,
+                continuity_before=continuity_before,
                 attempt_generator=attempt_generator,
                 rewrite_brief=rewrite_brief,
                 current_draft=current_draft,
-                scene_card=scene_card,
+                phase_label=phase_label,
+                attempt_number=attempt_number,
             )
+            scene_text = evaluation.scene_text
             storage.save_text(
                 storage.rewrite_path(
                     scene_card.scene_number,
@@ -784,28 +961,8 @@ class NovelPipeline:
                 scene_text + "\n",
             )
 
-            validation_report = self.validator.validate(
-                scene_text=scene_text,
-                scene_card=scene_card,
-                story_spec=story_spec,
-                continuity_state=continuity_before,
-            )
-            qa_report = self.scene_judge.judge(
-                story_spec=story_spec,
-                editorial_blueprint=editorial_blueprint,
-                scene_card=scene_card,
-                continuity_state=continuity_before,
-                validation_report=validation_report,
-                scene_text=scene_text,
-                book_intake=book_intake,
-            )
-            merged_report = self._merge_validation_into_qa(
-                qa_report,
-                validation_report,
-                editorial_blueprint=editorial_blueprint,
-                scene_card=scene_card,
-                total_scenes=story_spec.expected_scenes,
-            )
+            validation_report = evaluation.validation_report
+            merged_report = evaluation.qa_report
             if merged_report.pass_fail or not storage.has_approved_scene(scene_card.scene_number):
                 storage.save_model(storage.scene_qa_path(scene_card.scene_number), merged_report)
             storage.append_log(
@@ -814,6 +971,7 @@ class NovelPipeline:
                     "scene_number": scene_card.scene_number,
                     "phase": phase_label,
                     "attempt_number": attempt_number,
+                    "candidate_number": evaluation.candidate_number,
                     "pass_fail": merged_report.pass_fail,
                 },
             )
@@ -840,6 +998,100 @@ class NovelPipeline:
             f"Scene {scene_card.scene_number} failed QA after {self.config.max_scene_rewrites + 1} attempts."
         )
 
+    def _select_scene_attempt(
+        self,
+        *,
+        storage: RunStorage,
+        story_spec: StorySpec,
+        editorial_blueprint: EditorialBlueprint,
+        book_intake: BookIntake | None,
+        scene_card: SceneCard,
+        continuity_before: ContinuityState,
+        attempt_generator: Callable[[str | None, str | None], str],
+        rewrite_brief: str | None,
+        current_draft: str | None,
+        phase_label: str,
+        attempt_number: int,
+    ) -> SceneAttemptEvaluation:
+        """Evaluates one draft attempt, optionally using anchor-scene best-of-N selection."""
+
+        if not self._should_use_anchor_best_of_n(
+            scene_card=scene_card,
+            editorial_blueprint=editorial_blueprint,
+            total_scenes=story_spec.expected_scenes,
+            phase_label=phase_label,
+            attempt_number=attempt_number,
+            rewrite_brief=rewrite_brief,
+            current_draft=current_draft,
+        ):
+            scene_text = self._generate_scene_text(
+                attempt_generator=attempt_generator,
+                rewrite_brief=rewrite_brief,
+                current_draft=current_draft,
+                scene_card=scene_card,
+            )
+            return self._evaluate_scene_attempt(
+                story_spec=story_spec,
+                editorial_blueprint=editorial_blueprint,
+                book_intake=book_intake,
+                scene_card=scene_card,
+                continuity_before=continuity_before,
+                scene_text=scene_text,
+                candidate_number=1,
+            )
+
+        evaluations: list[SceneAttemptEvaluation] = []
+        candidate_count = max(2, self.config.anchor_best_of_n_candidates)
+        for candidate_number in range(1, candidate_count + 1):
+            scene_text = self._generate_scene_text(
+                attempt_generator=attempt_generator,
+                rewrite_brief=rewrite_brief,
+                current_draft=current_draft,
+                scene_card=scene_card,
+            )
+            storage.save_text(
+                storage.candidate_path(
+                    scene_card.scene_number,
+                    attempt_number,
+                    candidate_number,
+                    phase_label=phase_label,
+                ),
+                scene_text + "\n",
+            )
+            evaluations.append(
+                self._evaluate_scene_attempt(
+                    story_spec=story_spec,
+                    editorial_blueprint=editorial_blueprint,
+                    book_intake=book_intake,
+                    scene_card=scene_card,
+                    continuity_before=continuity_before,
+                    scene_text=scene_text,
+                    candidate_number=candidate_number,
+                )
+            )
+
+        selected = self._select_best_scene_candidate(evaluations, scene_card=scene_card)
+        storage.append_log(
+            "anchor_best_of_n_completed",
+            {
+                "scene_number": scene_card.scene_number,
+                "attempt_number": attempt_number,
+                "selected_candidate": selected.candidate_number,
+                "candidate_count": candidate_count,
+                "candidates": [
+                    {
+                        "candidate_number": evaluation.candidate_number,
+                        "pass_fail": evaluation.qa_report.pass_fail,
+                        "quality_score": self._scene_quality_total(evaluation.qa_report),
+                        "ai_smell_score": evaluation.qa_report.ai_smell_score,
+                        "hard_fail_reasons": len(evaluation.qa_report.hard_fail_reasons),
+                    }
+                    for evaluation in evaluations
+                ],
+            },
+        )
+        return selected
+
     def _generate_scene_text(
         self,
         *,
@@ -860,6 +1112,126 @@ class NovelPipeline:
                 scene_card.scene_number,
             )
         return latest_scene_text
+
+    def _evaluate_scene_attempt(
+        self,
+        *,
+        story_spec: StorySpec,
+        editorial_blueprint: EditorialBlueprint,
+        book_intake: BookIntake | None,
+        scene_card: SceneCard,
+        continuity_before: ContinuityState,
+        scene_text: str,
+        candidate_number: int,
+    ) -> SceneAttemptEvaluation:
+        """Runs deterministic and model QA for one candidate scene draft."""
+
+        validation_report = self.validator.validate(
+            scene_text=scene_text,
+            scene_card=scene_card,
+            story_spec=story_spec,
+            continuity_state=continuity_before,
+        )
+        qa_report = self.scene_judge.judge(
+            story_spec=story_spec,
+            editorial_blueprint=editorial_blueprint,
+            scene_card=scene_card,
+            continuity_state=continuity_before,
+            validation_report=validation_report,
+            scene_text=scene_text,
+            book_intake=book_intake,
+        )
+        merged_report = self._merge_validation_into_qa(
+            qa_report,
+            validation_report,
+            editorial_blueprint=editorial_blueprint,
+            scene_card=scene_card,
+            total_scenes=story_spec.expected_scenes,
+        )
+        return SceneAttemptEvaluation(
+            scene_text=scene_text,
+            validation_report=validation_report,
+            qa_report=merged_report,
+            candidate_number=candidate_number,
+        )
+
+    def _should_use_anchor_best_of_n(
+        self,
+        *,
+        scene_card: SceneCard,
+        editorial_blueprint: EditorialBlueprint,
+        total_scenes: int,
+        phase_label: str,
+        attempt_number: int,
+        rewrite_brief: str | None,
+        current_draft: str | None,
+    ) -> bool:
+        """Returns True when the pipeline should evaluate several candidates before choosing."""
+
+        if not self.config.anchor_best_of_n_enabled or self.config.anchor_best_of_n_candidates < 2:
+            return False
+        if phase_label != "draft" or attempt_number != 0:
+            return False
+        if rewrite_brief is not None or current_draft is not None:
+            return False
+        return self._is_anchor_scene(
+            scene_card=scene_card,
+            editorial_blueprint=editorial_blueprint,
+            total_scenes=total_scenes,
+        )
+
+    def _select_best_scene_candidate(
+        self,
+        evaluations: list[SceneAttemptEvaluation],
+        *,
+        scene_card: SceneCard,
+    ) -> SceneAttemptEvaluation:
+        """Chooses the strongest candidate from an anchor-scene best-of-N batch."""
+
+        if not evaluations:
+            raise RuntimeError("Anchor best-of-N completed without any candidate evaluations.")
+        return max(
+            evaluations,
+            key=lambda evaluation: (
+                1 if evaluation.qa_report.pass_fail else 0,
+                1 if evaluation.qa_report.deterministic_pass else 0,
+                -self._validation_error_count(evaluation.validation_report),
+                -self._validation_warning_count(evaluation.validation_report),
+                -len(evaluation.qa_report.hard_fail_reasons),
+                self._scene_quality_total(evaluation.qa_report),
+                -evaluation.qa_report.ai_smell_score,
+                -abs(evaluation.validation_report.word_count - scene_card.target_words),
+            ),
+        )
+
+    def _scene_quality_total(self, qa_report: SceneQaReport) -> int:
+        """Aggregates positive scene-QA scores for candidate ranking."""
+
+        score_fields = (
+            "continuity_score",
+            "engagement_score",
+            "voice_score",
+            "pacing_score",
+            "specificity_score",
+            "prose_freshness_score",
+            "emotional_movement_score",
+            "subtext_score",
+            "concealment_score",
+            "leverage_shift_score",
+            "relationship_cost_score",
+            "commercial_hook_score",
+        )
+        return sum(getattr(qa_report, field_name) for field_name in score_fields)
+
+    def _validation_error_count(self, validation_report: DeterministicValidationReport) -> int:
+        """Returns the number of deterministic hard failures in a candidate draft."""
+
+        return sum(1 for finding in validation_report.findings if finding.severity == "error")
+
+    def _validation_warning_count(self, validation_report: DeterministicValidationReport) -> int:
+        """Returns the number of deterministic warnings in a candidate draft."""
+
+        return sum(1 for finding in validation_report.findings if finding.severity == "warning")
 
     def _scene_text_looks_truncated(self, scene_text: str, scene_card: SceneCard) -> bool:
         """Returns True when a scene draft is too short or ends like an accidental cutoff."""
@@ -1042,6 +1414,247 @@ class NovelPipeline:
         return lower_type in quiet_types and not self._scene_has_counterforce(
             scene_card,
             editorial_blueprint,
+        )
+
+    def _collect_reader_repair_targets(
+        self,
+        *,
+        storage: RunStorage,
+        artifacts: ProjectArtifacts,
+    ) -> list[RepairTarget]:
+        """Builds repair targets from cold-reader and pacing-analysis reports."""
+
+        targets: list[RepairTarget] = []
+        total_scenes = len(artifacts.scene_cards)
+
+        if storage.cold_reader_path.exists():
+            cold_reader_report = storage.load_model(storage.cold_reader_path, ColdReaderReport)
+            targets.extend(self._cold_reader_repair_targets(cold_reader_report, total_scenes=total_scenes))
+        if storage.pacing_analysis_path.exists():
+            pacing_analysis = storage.load_model(storage.pacing_analysis_path, PacingAnalysis)
+            targets.extend(self._pacing_repair_targets(pacing_analysis, total_scenes=total_scenes))
+        return self._merge_repair_targets(targets)
+
+    def _cold_reader_repair_targets(
+        self,
+        cold_reader_report: ColdReaderReport,
+        *,
+        total_scenes: int,
+    ) -> list[RepairTarget]:
+        """Converts cold-reader observations into scene repair targets."""
+
+        targets: list[RepairTarget] = []
+        for scene_number in cold_reader_report.weakest_scenes:
+            if 1 <= scene_number <= total_scenes:
+                targets.append(
+                    RepairTarget(
+                        scene_number=scene_number,
+                        reason="Cold-reader pass marked this as a weakest scene.",
+                        rewrite_brief=(
+                            "Make this scene less predictable, sharpen causal clarity, and ensure the "
+                            "emotional or narrative turn feels indispensable instead of optional."
+                        ),
+                    )
+                )
+
+        note_groups = [
+            (
+                cold_reader_report.confusion_points,
+                "Cold-reader confusion point",
+                "Clarify who knows what, where everyone is, and why the key turn matters without adding explanatory drag.",
+            ),
+            (
+                cold_reader_report.engagement_drops,
+                "Cold-reader engagement drop",
+                "Tighten the opening pressure, cut drift, and land on a sharper choice or destabilizing turn.",
+            ),
+            (
+                cold_reader_report.character_tracking_issues,
+                "Cold-reader character-tracking issue",
+                "Anchor who is present, who is acting, and how the interpersonal geometry changes on-page.",
+            ),
+            (
+                cold_reader_report.predictable_moments,
+                "Cold-reader predictability note",
+                "Replace the expected beat with a more surprising but inevitable turn, and make the cost feel specific.",
+            ),
+        ]
+        for notes, label, rewrite_brief in note_groups:
+            for note in notes:
+                for scene_number in self._extract_scene_numbers(note, total_scenes=total_scenes):
+                    targets.append(
+                        RepairTarget(
+                            scene_number=scene_number,
+                            reason=f"{label}: {truncate_text(note, 180)}",
+                            rewrite_brief=rewrite_brief,
+                        )
+                    )
+        return targets
+
+    def _pacing_repair_targets(
+        self,
+        pacing_analysis: PacingAnalysis,
+        *,
+        total_scenes: int,
+    ) -> list[RepairTarget]:
+        """Converts pacing-analysis observations into scene repair targets."""
+
+        targets: list[RepairTarget] = []
+        for note in [*pacing_analysis.tension_sags, *pacing_analysis.fatigue_zones]:
+            for scene_number in self._extract_scene_numbers(note, total_scenes=total_scenes):
+                targets.append(
+                    RepairTarget(
+                        scene_number=scene_number,
+                        reason=f"Pacing analysis flagged a sag: {truncate_text(note, 180)}",
+                        rewrite_brief=(
+                            "Reduce explanatory drag, make pressure or emotional movement visibly change within "
+                            "the scene, and strengthen the forward pull into the next scene."
+                        ),
+                    )
+                )
+
+        low_metric_scenes = sorted(
+            [
+                scene_data
+                for scene_data in pacing_analysis.scene_data
+                if 1 <= scene_data.scene_number <= total_scenes
+                and (
+                    (
+                        scene_data.tension_level
+                        + scene_data.stakes_level
+                        + scene_data.action_density
+                        + scene_data.emotional_intensity
+                    )
+                    / 4
+                )
+                <= 3.0
+            ],
+            key=lambda scene_data: (
+                (
+                    scene_data.tension_level
+                    + scene_data.stakes_level
+                    + scene_data.action_density
+                    + scene_data.emotional_intensity
+                )
+                / 4,
+                scene_data.tension_level,
+                scene_data.action_density,
+            ),
+        )[:3]
+        for scene_data in low_metric_scenes:
+            targets.append(
+                RepairTarget(
+                    scene_number=scene_data.scene_number,
+                    reason="Pacing curve shows this scene as a low-energy pocket.",
+                    rewrite_brief=self._build_pacing_metric_rewrite_brief(scene_data),
+                )
+            )
+        return targets
+
+    def _build_pacing_metric_rewrite_brief(self, scene_data: object) -> str:
+        """Builds a focused rewrite brief from low pacing metrics."""
+
+        parts: list[str] = []
+        tension_level = getattr(scene_data, "tension_level", 0)
+        stakes_level = getattr(scene_data, "stakes_level", 0)
+        action_density = getattr(scene_data, "action_density", 0)
+        emotional_intensity = getattr(scene_data, "emotional_intensity", 0)
+        if tension_level <= 3:
+            parts.append("Raise immediate pressure or consequence.")
+        if stakes_level <= 3:
+            parts.append("Make the stakes concrete, personal, and harder to dismiss.")
+        if action_density <= 3:
+            parts.append("Replace static explanation with consequential movement, confrontation, or decision.")
+        if emotional_intensity <= 3:
+            parts.append("Make the emotional turn legible through behavior, cost, and changed leverage.")
+        if not parts:
+            parts.append("Tighten pacing and make the turn in this scene more consequential.")
+        return " ".join(parts)
+
+    def _extract_scene_numbers(self, note: str, *, total_scenes: int) -> list[int]:
+        """Extracts scene numbers from free-form QA notes when they are explicitly referenced."""
+
+        lowered = (note or "").lower()
+        if "scene" not in lowered:
+            return []
+
+        scene_numbers: list[int] = []
+        for match in re.finditer(r"scenes?\s+#?(\d+)\s*(?:-|to|through)\s*(\d+)", lowered):
+            start = int(match.group(1))
+            end = int(match.group(2))
+            if start > end:
+                start, end = end, start
+            if end - start <= 4:
+                scene_numbers.extend(range(start, end + 1))
+            else:
+                scene_numbers.extend([start, end])
+
+        for match in re.finditer(r"scene\s+#?(\d+)", lowered):
+            scene_numbers.append(int(match.group(1)))
+
+        if not scene_numbers:
+            scene_numbers.extend(int(match.group(0)) for match in re.finditer(r"\b\d+\b", lowered))
+
+        unique_numbers: list[int] = []
+        for scene_number in scene_numbers:
+            if 1 <= scene_number <= total_scenes and scene_number not in unique_numbers:
+                unique_numbers.append(scene_number)
+        return unique_numbers
+
+    def _merge_repair_targets(self, *repair_target_groups: list[RepairTarget]) -> list[RepairTarget]:
+        """Merges multiple repair-target lists into one deduplicated scene list."""
+
+        merged: dict[int, RepairTarget] = {}
+        for group in repair_target_groups:
+            for target in group:
+                existing = merged.get(target.scene_number)
+                if existing is None:
+                    merged[target.scene_number] = RepairTarget(
+                        scene_number=target.scene_number,
+                        reason=target.reason.strip(),
+                        rewrite_brief=target.rewrite_brief.strip(),
+                    )
+                    continue
+                merged[target.scene_number] = RepairTarget(
+                    scene_number=target.scene_number,
+                    reason="; ".join(
+                        dict.fromkeys(
+                            [
+                                existing.reason.strip(),
+                                target.reason.strip(),
+                            ]
+                        )
+                    ).strip(),
+                    rewrite_brief="\n".join(
+                        dict.fromkeys(
+                            [
+                                existing.rewrite_brief.strip(),
+                                target.rewrite_brief.strip(),
+                            ]
+                        )
+                    ).strip(),
+                )
+        return [merged[number] for number in sorted(merged)]
+
+    def _build_repair_context_report(
+        self,
+        *,
+        global_report: GlobalQaReport,
+        repair_targets: list[RepairTarget],
+    ) -> GlobalQaReport:
+        """Builds the report object passed into targeted scene repairs."""
+
+        return global_report.model_copy(
+            update={
+                "pass_fail": False,
+                "major_problems": list(
+                    dict.fromkeys(
+                        list(global_report.major_problems)
+                        + [target.reason for target in repair_targets]
+                    )
+                )[:12],
+                "repair_targets": repair_targets,
+            }
         )
 
     def _counterforce_keywords(self, editorial_blueprint: EditorialBlueprint) -> set[str]:

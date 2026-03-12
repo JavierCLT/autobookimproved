@@ -35,6 +35,8 @@ class RunStorage:
         self.qa_dir = ensure_directory(self.root / "qa")
         self.rewrites_dir = ensure_directory(self.root / "rewrites")
         self.chapters_dir = ensure_directory(self.root / "chapters")
+        self.voice_dir = ensure_directory(self.root / "voice")
+        self.candidates_dir = ensure_directory(self.root / "candidates")
         self.ensure_layout()
 
     def ensure_layout(self) -> None:
@@ -46,6 +48,8 @@ class RunStorage:
             self.qa_dir,
             self.rewrites_dir,
             self.chapters_dir,
+            self.voice_dir,
+            self.candidates_dir,
         ]:
             ensure_directory(directory)
 
@@ -72,6 +76,18 @@ class RunStorage:
     @property
     def editorial_blueprint_path(self) -> Path:
         return self.root / "editorial_blueprint.json"
+
+    @property
+    def voice_dna_path(self) -> Path:
+        return self.voice_dir / "voice_dna.json"
+
+    @property
+    def plant_payoff_map_path(self) -> Path:
+        return self.root / "plant_payoff_map.json"
+
+    @property
+    def subplot_weave_path(self) -> Path:
+        return self.root / "subplot_weave_map.json"
 
     @property
     def scene_cards_path(self) -> Path:
@@ -102,6 +118,14 @@ class RunStorage:
         return self.root / "global_qa_report.json"
 
     @property
+    def cold_reader_path(self) -> Path:
+        return self.root / "cold_reader_report.json"
+
+    @property
+    def pacing_analysis_path(self) -> Path:
+        return self.root / "pacing_analysis.json"
+
+    @property
     def run_log_path(self) -> Path:
         return self.root / "run_log.jsonl"
 
@@ -117,6 +141,20 @@ class RunStorage:
     ) -> Path:
         return self.rewrites_dir / (
             f"scene_{format_scene_number(scene_number)}_{phase_label}_attempt_{attempt_number:02d}.md"
+        )
+
+    def candidate_path(
+        self,
+        scene_number: int,
+        attempt_number: int,
+        candidate_number: int,
+        *,
+        phase_label: str = "draft",
+    ) -> Path:
+        """Returns the path for a candidate draft generated during best-of-N selection."""
+
+        return self.candidates_dir / (
+            f"scene_{format_scene_number(scene_number)}_{phase_label}_attempt_{attempt_number:02d}_candidate_{candidate_number:02d}.md"
         )
 
     def chapter_path(self, chapter_number: int) -> Path:

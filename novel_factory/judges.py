@@ -10,8 +10,12 @@ from novel_factory.prompts import (
     arc_qa_user_prompt,
     chapter_qa_system_prompt,
     chapter_qa_user_prompt,
+    cold_reader_system_prompt,
+    cold_reader_user_prompt,
     global_qa_system_prompt,
     global_qa_user_prompt,
+    pacing_analysis_system_prompt,
+    pacing_analysis_user_prompt,
     scene_qa_system_prompt,
     scene_qa_user_prompt,
 )
@@ -19,11 +23,13 @@ from novel_factory.schemas import (
     ArcQaReport,
     BookIntake,
     ChapterQaReport,
+    ColdReaderReport,
     ContinuityState,
     DeterministicValidationReport,
     EditorialBlueprint,
     GlobalQaReport,
     Outline,
+    PacingAnalysis,
     SceneCard,
     SceneQaReport,
     StorySpec,
@@ -67,6 +73,7 @@ class SceneJudge:
             temperature=self.config.qa_temperature,
             max_output_tokens=2_000,
             verbosity="low",
+            model_override=self.config.get_qa_model(),
         )
 
 
@@ -103,6 +110,7 @@ class GlobalJudge:
             temperature=self.config.global_qa_temperature,
             max_output_tokens=3_500,
             verbosity="low",
+            model_override=self.config.get_qa_model(),
         )
 
     def judge_chapter(
@@ -133,6 +141,7 @@ class GlobalJudge:
             temperature=self.config.qa_temperature,
             max_output_tokens=2_000,
             verbosity="low",
+            model_override=self.config.get_qa_model(),
         )
 
     def judge_arc(
@@ -165,4 +174,57 @@ class GlobalJudge:
             temperature=self.config.qa_temperature,
             max_output_tokens=2_000,
             verbosity="low",
+            model_override=self.config.get_qa_model(),
+        )
+
+
+class ColdReaderJudge:
+    """Reads the manuscript without planning context and reports reader experience."""
+
+    def __init__(self, llm: OpenAIResponsesClient, config: AppConfig) -> None:
+        self.llm = llm
+        self.config = config
+
+    def judge(self, *, story_spec: StorySpec, manuscript_text: str) -> ColdReaderReport:
+        """Runs the cold-reader pass."""
+
+        return self.llm.structured(
+            system_prompt=cold_reader_system_prompt(story_spec),
+            user_prompt=cold_reader_user_prompt(manuscript_text),
+            schema=ColdReaderReport,
+            task_name="cold_reader",
+            reasoning_effort=self.config.reasoning.global_qa,
+            temperature=self.config.global_qa_temperature,
+            max_output_tokens=4_000,
+            verbosity="low",
+            model_override=self.config.get_qa_model(),
+        )
+
+
+class PacingAnalyzer:
+    """Analyzes the full-manuscript tension curve scene by scene."""
+
+    def __init__(self, llm: OpenAIResponsesClient, config: AppConfig) -> None:
+        self.llm = llm
+        self.config = config
+
+    def analyze(
+        self,
+        *,
+        story_spec: StorySpec,
+        manuscript_text: str,
+        scene_count: int,
+    ) -> PacingAnalysis:
+        """Runs the pacing-analysis pass."""
+
+        return self.llm.structured(
+            system_prompt=pacing_analysis_system_prompt(story_spec),
+            user_prompt=pacing_analysis_user_prompt(manuscript_text, scene_count),
+            schema=PacingAnalysis,
+            task_name="pacing_analysis",
+            reasoning_effort=self.config.reasoning.global_qa,
+            temperature=self.config.global_qa_temperature,
+            max_output_tokens=5_000,
+            verbosity="low",
+            model_override=self.config.get_qa_model(),
         )

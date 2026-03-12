@@ -20,6 +20,7 @@ class ReasoningProfiles(BaseModel):
     qa: str = "medium"
     global_qa: str = "high"
     repair: str = "high"
+    voice_calibration: str = "high"
 
 
 class AppConfig(BaseModel):
@@ -29,6 +30,8 @@ class AppConfig(BaseModel):
 
     api_key: str
     model: str = "gpt-5.4"
+    drafting_model: str = ""
+    qa_model: str = ""
     run_root: Path = Path("runs")
     synopsis_encoding: str = "utf-8"
     default_audience: str = "Adult"
@@ -39,6 +42,8 @@ class AppConfig(BaseModel):
     target_scenes: int = 28
     recent_scene_summaries: int = 3
     max_scene_rewrites: int = 2
+    anchor_best_of_n_enabled: bool = True
+    anchor_best_of_n_candidates: int = 3
     retry_attempts: int = 4
     retry_base_delay_seconds: float = 1.5
     request_timeout_seconds: float = 240.0
@@ -52,6 +57,16 @@ class AppConfig(BaseModel):
     max_scene_context_chars: int = 10_000
     reasoning: ReasoningProfiles = Field(default_factory=ReasoningProfiles)
 
+    def get_drafting_model(self) -> str:
+        """Returns the prose-generation model, falling back to the primary model."""
+
+        return self.drafting_model or self.model
+
+    def get_qa_model(self) -> str:
+        """Returns the judge-analysis model, falling back to the primary model."""
+
+        return self.qa_model or self.model
+
 
 def load_config(require_api_key: bool = True) -> AppConfig:
     """Loads configuration from the environment."""
@@ -64,11 +79,20 @@ def load_config(require_api_key: bool = True) -> AppConfig:
     return AppConfig(
         api_key=api_key,
         model=os.getenv("OPENAI_MODEL", "gpt-5.4").strip() or "gpt-5.4",
+        drafting_model=os.getenv("OPENAI_DRAFTING_MODEL", "").strip(),
+        qa_model=os.getenv("OPENAI_QA_MODEL", "").strip(),
         run_root=Path(os.getenv("NOVEL_FACTORY_RUN_ROOT", "runs")),
         default_audience=os.getenv("NOVEL_FACTORY_DEFAULT_AUDIENCE", "Adult").strip() or "Adult",
         default_rating_ceiling=os.getenv("NOVEL_FACTORY_DEFAULT_RATING_CEILING", "R").strip() or "R",
         default_market_position=os.getenv("NOVEL_FACTORY_DEFAULT_MARKET_POSITION", "adult thriller").strip()
         or "adult thriller",
+        anchor_best_of_n_enabled=(
+            os.getenv("NOVEL_FACTORY_ANCHOR_BEST_OF_N_ENABLED", "true").strip().lower() == "true"
+        ),
+        anchor_best_of_n_candidates=max(
+            1,
+            int(os.getenv("NOVEL_FACTORY_ANCHOR_BEST_OF_N", "3")),
+        ),
     )
 
 

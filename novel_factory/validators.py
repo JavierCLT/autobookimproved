@@ -10,9 +10,11 @@ from novel_factory.schemas import (
     DeterministicValidationReport,
     EditorialBlueprint,
     Outline,
+    PlantPayoffMap,
     PlanValidationReport,
     SceneCard,
     StorySpec,
+    SubplotWeaveMap,
     ValidationFinding,
 )
 from novel_factory.utils import count_words, first_token, split_paragraphs, split_sentences
@@ -598,6 +600,8 @@ class PlanValidator:
         *,
         story_spec: StorySpec,
         editorial_blueprint: EditorialBlueprint,
+        plant_payoff_map: PlantPayoffMap | None,
+        subplot_weave_map: SubplotWeaveMap | None,
         outline: Outline,
         scene_cards: list[SceneCard],
         initial_continuity: ContinuityState,
@@ -608,6 +612,8 @@ class PlanValidator:
         findings.extend(self._structure_findings(story_spec, outline, scene_cards))
         findings.extend(self._blueprint_findings(story_spec, editorial_blueprint))
         findings.extend(self._scene_contract_findings(scene_cards))
+        findings.extend(self._plant_payoff_findings(scene_cards, plant_payoff_map))
+        findings.extend(self._subplot_weave_findings(scene_cards, subplot_weave_map))
         findings.extend(self._counterforce_findings(scene_cards, editorial_blueprint))
         findings.extend(self._rolling_intensity_findings(scene_cards, editorial_blueprint))
         findings.extend(self._initial_continuity_findings(initial_continuity))
@@ -776,6 +782,121 @@ class PlanValidator:
             )
         ]
 
+    def _plant_payoff_findings(
+        self,
+        scene_cards: list[SceneCard],
+        plant_payoff_map: PlantPayoffMap | None,
+    ) -> list[ValidationFinding]:
+        """Validates the plant/payoff registry against the scene plan."""
+
+        if plant_payoff_map is None:
+            return []
+
+        findings: list[ValidationFinding] = []
+        scene_count = len(scene_cards)
+        plants_by_scene = {scene.scene_number: set(scene.plants_in_scene) for scene in scene_cards}
+        payoffs_by_scene = {scene.scene_number: set(scene.payoffs_in_scene) for scene in scene_cards}
+
+        for entry in plant_payoff_map.entries:
+            if entry.plant_scene < 1 or entry.payoff_scene > scene_count:
+                findings.append(
+                    ValidationFinding(
+                        check_id="plant_payoff_scene_range",
+                        severity="error",
+                        message=f"Plant/payoff '{entry.element}' references a scene outside the planned range.",
+                        details=[f"Plant scene: {entry.plant_scene}", f"Payoff scene: {entry.payoff_scene}"],
+                    )
+                )
+                continue
+            if entry.plant_scene >= entry.payoff_scene:
+                findings.append(
+                    ValidationFinding(
+                        check_id="plant_payoff_order",
+                        severity="error",
+                        message=f"Plant/payoff '{entry.element}' does not land in chronological order.",
+                        details=[f"Plant scene: {entry.plant_scene}", f"Payoff scene: {entry.payoff_scene}"],
+                    )
+                )
+            if entry.element not in plants_by_scene.get(entry.plant_scene, set()):
+                findings.append(
+                    ValidationFinding(
+                        check_id="plant_missing_from_scene_card",
+                        severity="warning",
+                        message=f"Plant/payoff '{entry.element}' is not assigned to its plant scene card.",
+                        details=[f"Plant scene: {entry.plant_scene}"],
+                    )
+                )
+            if entry.element not in payoffs_by_scene.get(entry.payoff_scene, set()):
+                findings.append(
+                    ValidationFinding(
+                        check_id="payoff_missing_from_scene_card",
+                        severity="warning",
+                        message=f"Plant/payoff '{entry.element}' is not assigned to its payoff scene card.",
+                        details=[f"Payoff scene: {entry.payoff_scene}"],
+                    )
+                )
+        return findings
+
+    def _subplot_weave_findings(
+        self,
+        scene_cards: list[SceneCard],
+        subplot_weave_map: SubplotWeaveMap | None,
+    ) -> list[ValidationFinding]:
+        """Validates subplot appearances against the scene plan."""
+
+        if subplot_weave_map is None:
+            return []
+
+        findings: list[ValidationFinding] = []
+        scene_count = len(scene_cards)
+        subplot_turns_by_scene = {
+            scene.scene_number: " ".join(scene.subplot_turns).lower()
+            for scene in scene_cards
+        }
+
+        for subplot in subplot_weave_map.subplots:
+            if len(subplot.scene_appearances) < 3:
+                findings.append(
+                    ValidationFinding(
+                        check_id="subplot_too_thin",
+                        severity="warning",
+                        message=f"Subplot '{subplot.subplot_name}' appears too rarely to feel woven.",
+                        details=[f"Scene appearances: {subplot.scene_appearances}"],
+                    )
+                )
+            previous_scene: int | None = None
+            for scene_number in subplot.scene_appearances:
+                if scene_number < 1 or scene_number > scene_count:
+                    findings.append(
+                        ValidationFinding(
+                            check_id="subplot_scene_range",
+                            severity="error",
+                            message=f"Subplot '{subplot.subplot_name}' references a scene outside the planned range.",
+                            details=[f"Scene: {scene_number}"],
+                        )
+                    )
+                    continue
+                if subplot.subplot_name.lower() not in subplot_turns_by_scene.get(scene_number, ""):
+                    findings.append(
+                        ValidationFinding(
+                            check_id="subplot_turn_missing_from_scene_card",
+                            severity="warning",
+                            message=f"Subplot '{subplot.subplot_name}' is not reflected in the assigned scene card.",
+                            details=[f"Scene: {scene_number}"],
+                        )
+                    )
+                if previous_scene is not None and scene_number - previous_scene > 6:
+                    findings.append(
+                        ValidationFinding(
+                            check_id="subplot_gap_too_long",
+                            severity="warning",
+                            message=f"Subplot '{subplot.subplot_name}' goes dormant too long between scene appearances.",
+                            details=[f"Scenes {previous_scene} to {scene_number}"],
+                        )
+                    )
+                previous_scene = scene_number
+        return findings
+
     def _rolling_intensity_findings(
         self,
         scene_cards: list[SceneCard],
@@ -819,6 +940,17 @@ class PlanValidator:
                     severity="error",
                     message="Initial continuity must start at scene 0.",
                     details=[str(initial_continuity.last_approved_scene_number)],
+                )
+            )
+        if initial_continuity.character_knowledge and not any(
+            values for values in initial_continuity.character_knowledge.values()
+        ):
+            findings.append(
+                ValidationFinding(
+                    check_id="initial_character_knowledge_empty_map",
+                    severity="warning",
+                    message="Initial continuity includes character_knowledge keys with no tracked knowledge.",
+                    details=list(initial_continuity.character_knowledge.keys()),
                 )
             )
         return findings
