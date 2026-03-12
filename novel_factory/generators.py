@@ -12,6 +12,7 @@ from novel_factory.intake import (
 )
 from novel_factory.llm import OpenAIResponsesClient
 from novel_factory.prompts import (
+    editorial_blueprint_user_prompt,
     initial_continuity_user_prompt,
     outline_user_prompt,
     planning_system_prompt,
@@ -24,6 +25,7 @@ from novel_factory.prompts import (
 from novel_factory.schemas import (
     BookIntake,
     ContinuityState,
+    EditorialBlueprint,
     Outline,
     SceneCard,
     SceneCardCollection,
@@ -80,6 +82,7 @@ class NovelGenerator:
         self,
         synopsis: str,
         story_spec: StorySpec,
+        editorial_blueprint: EditorialBlueprint,
         book_intake: BookIntake | None = None,
     ) -> Outline:
         """Creates the macro outline from the locked story spec."""
@@ -93,6 +96,7 @@ class NovelGenerator:
             user_prompt=outline_user_prompt(
                 synopsis=synopsis,
                 story_spec=story_spec,
+                editorial_blueprint=editorial_blueprint,
                 intake_guidance=build_planning_guidance(book_intake),
             ),
             schema=Outline,
@@ -108,6 +112,7 @@ class NovelGenerator:
         synopsis: str,
         story_spec: StorySpec,
         outline: Outline,
+        editorial_blueprint: EditorialBlueprint,
         book_intake: BookIntake | None = None,
     ) -> list[SceneCard]:
         """Creates and normalizes all scene cards."""
@@ -122,6 +127,7 @@ class NovelGenerator:
                 synopsis=synopsis,
                 story_spec=story_spec,
                 outline=outline,
+                editorial_blueprint=editorial_blueprint,
                 intake_guidance=build_planning_guidance(book_intake),
             ),
             schema=SceneCardCollection,
@@ -132,6 +138,33 @@ class NovelGenerator:
             verbosity="low",
         )
         return self._normalize_scene_cards(collection.scene_cards, story_spec, outline)
+
+    def generate_editorial_blueprint(
+        self,
+        synopsis: str,
+        story_spec: StorySpec,
+        book_intake: BookIntake | None = None,
+    ) -> EditorialBlueprint:
+        """Creates the pre-draft editorial scaffold used to sharpen the pipeline."""
+
+        return self.llm.structured(
+            system_prompt=planning_system_prompt(
+                audience=story_spec.audience,
+                rating_ceiling=story_spec.rating_ceiling,
+                market_position=story_spec.subgenre or story_spec.genre,
+            ),
+            user_prompt=editorial_blueprint_user_prompt(
+                synopsis=synopsis,
+                story_spec=story_spec,
+                intake_guidance=build_planning_guidance(book_intake),
+            ),
+            schema=EditorialBlueprint,
+            task_name="editorial_blueprint",
+            reasoning_effort=self.config.reasoning.planning,
+            temperature=self.config.planning_temperature,
+            max_output_tokens=10_000,
+            verbosity="low",
+        )
 
     def generate_initial_continuity(
         self,
@@ -165,6 +198,7 @@ class NovelGenerator:
         *,
         story_spec: StorySpec,
         outline: Outline,
+        editorial_blueprint: EditorialBlueprint,
         scene_card: SceneCard,
         continuity_state: ContinuityState,
         recent_scene_summaries: list[str],
@@ -175,7 +209,7 @@ class NovelGenerator:
         """Drafts or rewrites a scene in prose."""
 
         is_rewrite = rewrite_brief is not None or current_draft is not None
-        story_brief = self._build_story_brief(story_spec)
+        story_brief = self._build_story_brief(story_spec, editorial_blueprint)
         chapter_brief = self._build_chapter_brief(outline, scene_card)
         continuity_brief = self._build_continuity_brief(continuity_state)
         return self.llm.text(
@@ -184,6 +218,7 @@ class NovelGenerator:
                 intake_guidance=build_drafting_guidance(book_intake),
                 story_brief=story_brief,
                 chapter_brief=chapter_brief,
+                editorial_blueprint=editorial_blueprint,
                 scene_card=scene_card,
                 continuity_brief=continuity_brief,
                 recent_scene_summaries=recent_scene_summaries,
@@ -239,6 +274,7 @@ class NovelGenerator:
         )
 
         moral_lines_crossed_to_add = self._detect_moral_line_crossings(
+            story_spec=story_spec,
             scene_card=scene_card,
             scene_text=scene_text,
         )
@@ -331,6 +367,7 @@ class NovelGenerator:
         *,
         story_spec: StorySpec,
         outline: Outline,
+        editorial_blueprint: EditorialBlueprint,
         scene_card: SceneCard,
         continuity_state: ContinuityState,
         current_scene: str,
@@ -345,6 +382,7 @@ class NovelGenerator:
             user_prompt=repair_scene_user_prompt(
                 story_spec=story_spec,
                 outline=outline,
+                editorial_blueprint=editorial_blueprint,
                 scene_card=scene_card,
                 continuity_state=continuity_state,
                 current_scene=current_scene,
@@ -375,6 +413,7 @@ class NovelGenerator:
     def _detect_moral_line_crossings(
         self,
         *,
+        story_spec: StorySpec,
         scene_card: SceneCard,
         scene_text: str,
     ) -> list[str]:
@@ -423,11 +462,28 @@ class NovelGenerator:
                 hits.append(candidate.strip())
 
         text_lower = scene_text.lower()
+        protagonist_name = self._primary_character_name(story_spec, fallback=scene_card.pov_character)
         text_triggers = [
-            ("Daniel lies to Elena", ("daniel", "elena"), (r"\blie\b", r"\blies\b", r"\blied\b")),
-            ("Daniel conceals evidence", ("daniel", "evidence"), (r"\bconceal(?:s|ed|ing)?\b", r"\bhide\s+evidence\b")),
-            ("Daniel tampers with bank logic", ("daniel", "bank"), (r"\btamper(?:s|ed|ing)?\b",)),
-            ("Daniel crosses a professional line", ("daniel", "policy"), (r"\bviolates?\b", r"\bbreaks?\s+protocol\b")),
+            (
+                f"{protagonist_name} lies on-page",
+                tuple(filter(None, (protagonist_name.lower(),))),
+                (r"\blie\b", r"\blies\b", r"\blied\b"),
+            ),
+            (
+                "Evidence is concealed on-page",
+                ("evidence",),
+                (r"\bconceal(?:s|ed|ing)?\b", r"\bhide\s+evidence\b"),
+            ),
+            (
+                "A critical system is tampered with on-page",
+                ("system",),
+                (r"\btamper(?:s|ed|ing)?\b",),
+            ),
+            (
+                "Professional protocol is violated on-page",
+                ("policy", "protocol", "compliance"),
+                (r"\bviolates?\b", r"\bbreaks?\s+protocol\b"),
+            ),
         ]
         for label, required_terms, trigger_regexes in text_triggers:
             if all(_contains_word(text_lower, term) for term in required_terms) and any(
@@ -535,7 +591,11 @@ class NovelGenerator:
         )
         return re.sub(r"\s+", " ", summary).strip()[:220]
 
-    def _build_story_brief(self, story_spec: StorySpec) -> str:
+    def _build_story_brief(
+        self,
+        story_spec: StorySpec,
+        editorial_blueprint: EditorialBlueprint,
+    ) -> str:
         """Builds a compact drafting brief from the locked story contract."""
 
         cast_lines = [
@@ -546,12 +606,25 @@ class NovelGenerator:
         parts = [
             f"Title: {story_spec.title_working}",
             f"Promise: {story_spec.one_sentence_promise}",
+            f"Commercial hook: {editorial_blueprint.commercial_hook}",
             f"Premise core: {story_spec.premise_core}",
             f"Emotional engine: {story_spec.emotional_engine}",
             f"Adversarial engine: {story_spec.adversarial_engine}",
             f"Moral fault line: {story_spec.moral_fault_line}",
+            f"Relationship focus: {editorial_blueprint.relationship_focus_name} ({editorial_blueprint.relationship_focus_role})",
+            f"Counterforce: {editorial_blueprint.counterforce_name} ({editorial_blueprint.counterforce_role})",
             "Key cast:\n" + ("\n".join(cast_lines) if cast_lines else "- None specified"),
             "Style guardrails:\n" + ("\n".join(f"- {line}" for line in style_lines) if style_lines else "- Keep pressure specific and readable."),
+            "Voice anchors:\n" + (
+                "\n".join(f"- {line}" for line in editorial_blueprint.voice_anchors[:6])
+                if editorial_blueprint.voice_anchors
+                else "- Keep pressure specific and readable."
+            ),
+            "Motif threads:\n" + (
+                "\n".join(f"- {line}" for line in editorial_blueprint.motif_threads[:5])
+                if editorial_blueprint.motif_threads
+                else "- No motifs locked."
+            ),
         ]
         return "\n".join(parts)
 
@@ -594,3 +667,14 @@ class NovelGenerator:
             block("Disallowed entities", continuity_state.disallowed_entities, limit=4),
         ]
         return "\n".join(parts)
+
+    def _primary_character_name(self, story_spec: StorySpec, *, fallback: str) -> str:
+        """Returns the likeliest protagonist name for generic continuity labels."""
+
+        for character in story_spec.cast:
+            role = character.role.lower()
+            if any(keyword in role for keyword in ("protagonist", "lead", "main")):
+                return character.name.strip() or fallback
+        if story_spec.cast and story_spec.cast[0].name.strip():
+            return story_spec.cast[0].name.strip()
+        return fallback.strip()

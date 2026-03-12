@@ -19,6 +19,7 @@ from novel_factory.schemas import (
     ChapterQaReport,
     ContinuityState,
     DeterministicValidationReport,
+    EditorialBlueprint,
     GlobalQaReport,
     Outline,
     RepairTarget,
@@ -51,6 +52,7 @@ class ProjectArtifacts:
     synopsis: str
     book_intake: BookIntake | None
     story_spec: StorySpec
+    editorial_blueprint: EditorialBlueprint
     outline: Outline
     scene_cards: list[SceneCard]
     continuity_state: ContinuityState
@@ -118,6 +120,21 @@ class NovelPipeline:
             storage.save_model(storage.story_spec_path, story_spec)
             storage.append_log("story_spec_generated", {"title": story_spec.title_working})
 
+        if storage.editorial_blueprint_path.exists():
+            editorial_blueprint = storage.load_model(storage.editorial_blueprint_path, EditorialBlueprint)
+            logger.info("Loaded existing editorial_blueprint.json")
+        else:
+            editorial_blueprint = self.generators.generate_editorial_blueprint(
+                synopsis_text,
+                story_spec,
+                book_intake=book_intake,
+            )
+            storage.save_model(storage.editorial_blueprint_path, editorial_blueprint)
+            storage.append_log(
+                "editorial_blueprint_generated",
+                {"commercial_hook": editorial_blueprint.commercial_hook},
+            )
+
         if storage.outline_path.exists():
             outline = storage.load_model(storage.outline_path, Outline)
             logger.info("Loaded existing outline.json")
@@ -125,6 +142,7 @@ class NovelPipeline:
             outline = self.generators.generate_outline(
                 synopsis_text,
                 story_spec,
+                editorial_blueprint,
                 book_intake=book_intake,
             )
             storage.save_model(storage.outline_path, outline)
@@ -138,6 +156,7 @@ class NovelPipeline:
                 synopsis_text,
                 story_spec,
                 outline,
+                editorial_blueprint,
                 book_intake=book_intake,
             )
             storage.save_model(
@@ -159,6 +178,7 @@ class NovelPipeline:
 
         plan_report = self.plan_validator.validate(
             story_spec=story_spec,
+            editorial_blueprint=editorial_blueprint,
             outline=outline,
             scene_cards=scene_cards,
             initial_continuity=initial_continuity,
@@ -177,6 +197,7 @@ class NovelPipeline:
             "bootstrap_completed",
             {
                 "story_spec_path": str(storage.story_spec_path),
+                "editorial_blueprint_path": str(storage.editorial_blueprint_path),
                 "outline_path": str(storage.outline_path),
                 "scene_cards_path": str(storage.scene_cards_path),
             },
@@ -203,6 +224,7 @@ class NovelPipeline:
         scene_text, qa_report = self._run_scene_loop(
             storage=storage,
             story_spec=artifacts.story_spec,
+            editorial_blueprint=artifacts.editorial_blueprint,
             outline=artifacts.outline,
             book_intake=artifacts.book_intake,
             scene_card=scene_card,
@@ -211,6 +233,7 @@ class NovelPipeline:
             attempt_generator=lambda rewrite_brief, current_draft: self.generators.draft_scene(
                 story_spec=artifacts.story_spec,
                 outline=artifacts.outline,
+                editorial_blueprint=artifacts.editorial_blueprint,
                 scene_card=scene_card,
                 continuity_state=continuity_before,
                 recent_scene_summaries=self._recent_summaries(continuity_before),
@@ -309,12 +332,21 @@ class NovelPipeline:
         report = self.global_judge.judge(
             story_spec=artifacts.story_spec,
             outline=artifacts.outline,
+            editorial_blueprint=artifacts.editorial_blueprint,
             manuscript_text=manuscript_text,
             book_intake=artifacts.book_intake,
         )
         storage.save_model(storage.global_qa_path, report)
         storage.append_log("global_qa_completed", {"pass_fail": report.pass_fail})
         return report
+
+    def editorial_qa(self, *, project: str) -> None:
+        """Runs chapter and arc QA, assembling the manuscript first when needed."""
+
+        storage = RunStorage(self.config, project)
+        if not storage.final_markdown_path.exists():
+            self.assemble_manuscript(project=project)
+        self._run_editorial_qa(project=project)
 
     def _run_editorial_qa(self, *, project: str) -> None:
         """Runs chapter and arc QA before the manuscript-level judge."""
@@ -377,6 +409,7 @@ class NovelPipeline:
             repaired_scene, repaired_qa = self._run_scene_loop(
                 storage=storage,
                 story_spec=artifacts.story_spec,
+                editorial_blueprint=artifacts.editorial_blueprint,
                 outline=artifacts.outline,
                 book_intake=artifacts.book_intake,
                 scene_card=scene_card,
@@ -385,6 +418,7 @@ class NovelPipeline:
                 attempt_generator=lambda rewrite_brief, current_draft, scene_card=scene_card, continuity_before=continuity_before, current_scene=current_scene: self.generators.repair_scene(
                     story_spec=artifacts.story_spec,
                     outline=artifacts.outline,
+                    editorial_blueprint=artifacts.editorial_blueprint,
                     scene_card=scene_card,
                     continuity_state=continuity_before,
                     current_scene=current_draft or current_scene,
@@ -431,6 +465,7 @@ class NovelPipeline:
             report = self.global_judge.judge_chapter(
                 story_spec=artifacts.story_spec,
                 outline=artifacts.outline,
+                editorial_blueprint=artifacts.editorial_blueprint,
                 chapter_number=chapter.chapter_number,
                 chapter_text=chapter_text,
                 scene_cards=artifacts.scene_cards,
@@ -439,7 +474,10 @@ class NovelPipeline:
             chapter_reports.append(report)
 
         arc_reports: list[ArcQaReport] = []
-        for arc_name, arc_focus, scene_numbers in self._editorial_arc_specs(artifacts.scene_cards):
+        for arc_name, arc_focus, scene_numbers in self._editorial_arc_specs(
+            artifacts.scene_cards,
+            artifacts.editorial_blueprint,
+        ):
             arc_text = "\n\n".join(
                 storage.load_text(storage.scene_path(scene_number)).strip()
                 for scene_number in scene_numbers
@@ -447,6 +485,7 @@ class NovelPipeline:
             report = self.global_judge.judge_arc(
                 story_spec=artifacts.story_spec,
                 outline=artifacts.outline,
+                editorial_blueprint=artifacts.editorial_blueprint,
                 arc_name=arc_name,
                 arc_focus=arc_focus,
                 scene_numbers=scene_numbers,
@@ -524,6 +563,7 @@ class NovelPipeline:
             repaired_scene, repaired_qa = self._run_scene_loop(
                 storage=storage,
                 story_spec=artifacts.story_spec,
+                editorial_blueprint=artifacts.editorial_blueprint,
                 outline=artifacts.outline,
                 book_intake=artifacts.book_intake,
                 scene_card=scene_card,
@@ -532,6 +572,7 @@ class NovelPipeline:
                 attempt_generator=lambda rewrite_brief, current_draft, scene_card=scene_card, continuity_before=continuity_before, current_scene=current_scene, target=target: self.generators.repair_scene(
                     story_spec=artifacts.story_spec,
                     outline=artifacts.outline,
+                    editorial_blueprint=artifacts.editorial_blueprint,
                     scene_card=scene_card,
                     continuity_state=continuity_before,
                     current_scene=current_draft or current_scene,
@@ -582,10 +623,24 @@ class NovelPipeline:
         elif storage.intake_markdown_path.exists():
             book_intake = parse_book_intake(storage.load_text(storage.intake_markdown_path))
 
+        synopsis = storage.load_text(storage.synopsis_path).strip()
+        story_spec = storage.load_model(storage.story_spec_path, StorySpec)
+        if storage.editorial_blueprint_path.exists():
+            editorial_blueprint = storage.load_model(storage.editorial_blueprint_path, EditorialBlueprint)
+        else:
+            editorial_blueprint = self.generators.generate_editorial_blueprint(
+                synopsis,
+                story_spec,
+                book_intake=book_intake,
+            )
+            storage.save_model(storage.editorial_blueprint_path, editorial_blueprint)
+            storage.append_log("editorial_blueprint_backfilled", {})
+
         return ProjectArtifacts(
-            synopsis=storage.load_text(storage.synopsis_path).strip(),
+            synopsis=synopsis,
             book_intake=book_intake,
-            story_spec=storage.load_model(storage.story_spec_path, StorySpec),
+            story_spec=story_spec,
+            editorial_blueprint=editorial_blueprint,
             outline=storage.load_model(storage.outline_path, Outline),
             scene_cards=storage.load_model(storage.scene_cards_path, SceneCardCollection).scene_cards,
             continuity_state=storage.load_model(storage.continuity_path, ContinuityState),
@@ -597,24 +652,43 @@ class NovelPipeline:
         summaries = continuity_state.recent_scene_summaries[-self.config.recent_scene_summaries :]
         return [truncate_text(summary, self.config.max_recent_scene_summary_chars) for summary in summaries]
 
-    def _editorial_arc_specs(self, scene_cards: list[SceneCard]) -> list[tuple[str, str, list[int]]]:
+    def _editorial_arc_specs(
+        self,
+        scene_cards: list[SceneCard],
+        editorial_blueprint: EditorialBlueprint,
+    ) -> list[tuple[str, str, list[int]]]:
         """Returns targeted manuscript slices for intermediate arc QA."""
 
         total_scenes = len(scene_cards)
         opening_numbers = list(range(1, min(total_scenes, 4) + 1))
+        midpoint_center = max(1, total_scenes // 2)
+        midpoint_numbers = list(
+            range(max(1, midpoint_center - 1), min(total_scenes, midpoint_center + 2) + 1)
+        )
         counterforce_numbers = [
-            scene.scene_number for scene in scene_cards if self._scene_has_counterforce(scene)
+            scene.scene_number
+            for scene in scene_cards
+            if self._scene_has_counterforce(scene, editorial_blueprint)
         ][:6]
         relationship_numbers = [
-            scene.scene_number for scene in scene_cards if self._scene_has_relationship_pressure(scene)
+            scene.scene_number
+            for scene in scene_cards
+            if self._scene_has_relationship_pressure(scene, editorial_blueprint)
         ][:6]
         ending_numbers = list(range(max(1, total_scenes - 3), total_scenes + 1))
 
+        relationship_label = editorial_blueprint.relationship_focus_name.strip() or "the core relationship"
+        counterforce_label = editorial_blueprint.counterforce_name.strip() or "the counterforce"
         specs: list[tuple[str, str, list[int]]] = [
             (
                 "opening",
                 "Does the opening create immediate compulsion, visible human cost, and a concrete shadow of pursuit or consequence?",
                 opening_numbers,
+            ),
+            (
+                "midpoint",
+                "Does the middle of the book deliver an irreversible reframe, reveal, or escalation rather than competent procedural drift?",
+                midpoint_numbers,
             ),
             (
                 "ending",
@@ -626,7 +700,7 @@ class NovelPipeline:
             specs.append(
                 (
                     "counterforce",
-                    "Does the counterforce feel like a hunter rather than an abstract audit function, and does suspicion narrow the field?",
+                    f"Does {counterforce_label} feel like a hunter rather than a remote abstraction, and does suspicion or exposure narrow the field?",
                     counterforce_numbers,
                 )
             )
@@ -634,37 +708,42 @@ class NovelPipeline:
             specs.append(
                 (
                     "relationship",
-                    "Does the marriage deteriorate through refusals, absences, concealment, and cost rather than summary or theme?",
+                    f"Does pressure on {relationship_label} materialize through refusals, absences, concealment, tenderness, and cost rather than summary or theme?",
                     relationship_numbers,
                 )
             )
         return specs
 
-    def _scene_has_counterforce(self, scene_card: SceneCard) -> bool:
+    def _scene_has_counterforce(
+        self,
+        scene_card: SceneCard,
+        editorial_blueprint: EditorialBlueprint,
+    ) -> bool:
         """Returns True when a scene visibly advances pursuit or institutional shadow."""
 
         text = " ".join(
             [scene_card.counterforce_trace, scene_card.suspicion_delta, scene_card.pressure_source]
         ).lower()
-        if any(
-            keyword in text
-            for keyword in ("marta", "conduct", "suspicion", "extract", "audit", "inquiry", "memo")
-        ):
+        if any(keyword in text for keyword in self._counterforce_keywords(editorial_blueprint)):
             return True
         return "review" in text and any(
-            keyword in text
-            for keyword in ("conduct", "marta", "extract", "suspicion", "audit", "request", "trail")
+            keyword in text for keyword in self._counterforce_keywords(editorial_blueprint)
         )
 
-    def _scene_has_relationship_pressure(self, scene_card: SceneCard) -> bool:
+    def _scene_has_relationship_pressure(
+        self,
+        scene_card: SceneCard,
+        editorial_blueprint: EditorialBlueprint,
+    ) -> bool:
         """Returns True when a scene materially advances the marriage/relationship arc."""
 
         text = " ".join(
             [scene_card.relationship_delta, scene_card.secret_pressure, scene_card.cost_paid]
         ).lower()
-        return scene_card.pov_character.lower().startswith("elena") or any(
-            keyword in text
-            for keyword in ("elena", "marriage", "home", "withdraw", "silence", "distance", "leave", "refuse", "cold")
+        relationship_name = editorial_blueprint.relationship_focus_name.lower().strip()
+        return (
+            bool(relationship_name and relationship_name in scene_card.pov_character.lower())
+            or any(keyword in text for keyword in self._relationship_keywords(editorial_blueprint))
         )
 
     def _run_scene_loop(
@@ -672,6 +751,7 @@ class NovelPipeline:
         *,
         storage: RunStorage,
         story_spec: StorySpec,
+        editorial_blueprint: EditorialBlueprint,
         outline: Outline,
         book_intake: BookIntake | None,
         scene_card: SceneCard,
@@ -712,6 +792,7 @@ class NovelPipeline:
             )
             qa_report = self.scene_judge.judge(
                 story_spec=story_spec,
+                editorial_blueprint=editorial_blueprint,
                 scene_card=scene_card,
                 continuity_state=continuity_before,
                 validation_report=validation_report,
@@ -721,6 +802,7 @@ class NovelPipeline:
             merged_report = self._merge_validation_into_qa(
                 qa_report,
                 validation_report,
+                editorial_blueprint=editorial_blueprint,
                 scene_card=scene_card,
                 total_scenes=story_spec.expected_scenes,
             )
@@ -799,6 +881,7 @@ class NovelPipeline:
         qa_report: SceneQaReport,
         validation_report: DeterministicValidationReport,
         *,
+        editorial_blueprint: EditorialBlueprint,
         scene_card: SceneCard,
         total_scenes: int,
     ) -> SceneQaReport:
@@ -824,11 +907,15 @@ class NovelPipeline:
             "relationship_cost_score": 3,
             "commercial_hook_score": 4,
         }
-        if self._is_anchor_scene(scene_card=scene_card, total_scenes=total_scenes):
+        if self._is_anchor_scene(
+            scene_card=scene_card,
+            editorial_blueprint=editorial_blueprint,
+            total_scenes=total_scenes,
+        ):
             thresholds["voice_score"] = 4
-        if self._scene_needs_relationship_cost(scene_card):
+        if self._scene_needs_relationship_cost(scene_card, editorial_blueprint):
             thresholds["relationship_cost_score"] = 4
-        if self._scene_allows_quieter_opening_drive(scene_card):
+        if self._scene_allows_quieter_opening_drive(scene_card, editorial_blueprint):
             thresholds["pacing_score"] = 3
             thresholds["commercial_hook_score"] = 3
         for field_name, minimum_score in thresholds.items():
@@ -886,7 +973,13 @@ class NovelPipeline:
                 parts.append(guidance)
         return "\n".join(part for part in parts if part).strip()
 
-    def _is_anchor_scene(self, *, scene_card: SceneCard, total_scenes: int) -> bool:
+    def _is_anchor_scene(
+        self,
+        *,
+        scene_card: SceneCard,
+        editorial_blueprint: EditorialBlueprint,
+        total_scenes: int,
+    ) -> bool:
         """Returns True when a scene should clear a higher QA bar."""
 
         lower_type = scene_card.scene_type.lower()
@@ -902,50 +995,42 @@ class NovelPipeline:
             "ending",
         }
         anchor_numbers = {1, max(1, total_scenes // 2), min(total_scenes, (total_scenes // 2) + 1), max(1, total_scenes - 1), total_scenes}
+        relationship_name = editorial_blueprint.relationship_focus_name.lower().strip()
         return (
             lower_type in anchor_types
             or scene_card.scene_number in anchor_numbers
-            or scene_card.pov_character.lower().startswith("elena")
+            or bool(relationship_name and relationship_name in scene_card.pov_character.lower())
         )
 
-    def _scene_needs_relationship_cost(self, scene_card: SceneCard) -> bool:
+    def _scene_needs_relationship_cost(
+        self,
+        scene_card: SceneCard,
+        editorial_blueprint: EditorialBlueprint,
+    ) -> bool:
         """Returns True when the scene should clear a higher interpersonal-cost bar."""
 
         text = " ".join([scene_card.relationship_delta, scene_card.secret_pressure, scene_card.cost_paid]).lower()
         required_entities_text = " ".join(scene_card.required_entities).lower()
         location_text = scene_card.location.lower()
+        relationship_keywords = self._relationship_keywords(editorial_blueprint)
+        relationship_name = editorial_blueprint.relationship_focus_name.lower().strip()
         if "off-page" in text:
             return False
         if scene_card.scene_type.lower() == "domestic fracture":
             return True
-        if scene_card.pov_character.lower().startswith("elena"):
+        if relationship_name and relationship_name in scene_card.pov_character.lower():
             return True
-        if any(keyword in required_entities_text for keyword in ("elena", "wife", "husband")):
+        if any(keyword in required_entities_text for keyword in relationship_keywords):
             return True
         if any(keyword in location_text for keyword in ("apartment", "home", "kitchen", "bedroom")):
             return True
-        relationship_patterns = (
-            r"\belena\b",
-            r"\bmarriage\b",
-            r"\bhusband\b",
-            r"\bwife\b",
-            r"\bhome\b",
-            r"\bdistance\b",
-            r"\bwithdraw\b",
-            r"\bwithdraws\b",
-            r"\bwithdrawal\b",
-            r"\bseparation\b",
-            r"\bseparate\b",
-            r"\bsplit\b",
-            r"\bdivorce\b",
-            r"\bleaves him\b",
-            r"\bleaves her\b",
-            r"\bleave him\b",
-            r"\bleave her\b",
-        )
-        return any(re.search(pattern, text) for pattern in relationship_patterns)
+        return any(keyword in text for keyword in relationship_keywords)
 
-    def _scene_allows_quieter_opening_drive(self, scene_card: SceneCard) -> bool:
+    def _scene_allows_quieter_opening_drive(
+        self,
+        scene_card: SceneCard,
+        editorial_blueprint: EditorialBlueprint,
+    ) -> bool:
         """Returns True when a scene can trade some hook velocity for intimacy or set-up."""
 
         lower_type = scene_card.scene_type.lower()
@@ -954,7 +1039,62 @@ class NovelPipeline:
             "cover story",
             "fallout",
         }
-        return lower_type in quiet_types and not self._scene_has_counterforce(scene_card)
+        return lower_type in quiet_types and not self._scene_has_counterforce(
+            scene_card,
+            editorial_blueprint,
+        )
+
+    def _counterforce_keywords(self, editorial_blueprint: EditorialBlueprint) -> set[str]:
+        """Returns story-specific and generic keywords for pursuit pressure."""
+
+        return self._keyword_tokens(
+            editorial_blueprint.counterforce_name,
+            editorial_blueprint.counterforce_role,
+            "review",
+            "suspicion",
+            "audit",
+            "memo",
+            "trace",
+            "footprint",
+            "inquiry",
+            "request",
+            "pursuit",
+            "exposure",
+            "hunter",
+            "threat",
+        )
+
+    def _relationship_keywords(self, editorial_blueprint: EditorialBlueprint) -> set[str]:
+        """Returns story-specific and generic keywords for relationship cost."""
+
+        return self._keyword_tokens(
+            editorial_blueprint.relationship_focus_name,
+            editorial_blueprint.relationship_focus_role,
+            "relationship",
+            "marriage",
+            "trust",
+            "distance",
+            "withdraw",
+            "silence",
+            "leave",
+            "refuse",
+            "cold",
+            "home",
+            "love",
+            "betray",
+            "intimacy",
+            "family",
+        )
+
+    def _keyword_tokens(self, *values: str) -> set[str]:
+        """Normalizes keyword tokens from names, roles, and generic hints."""
+
+        tokens: set[str] = set()
+        for value in values:
+            for token in re.findall(r"[a-z0-9']+", (value or "").lower()):
+                if len(token) >= 4:
+                    tokens.add(token)
+        return tokens
 
     def _approve_scene(
         self,

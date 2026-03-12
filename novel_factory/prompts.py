@@ -8,6 +8,7 @@ from novel_factory.schemas import (
     ContinuityState,
     ContinuityUpdate,
     DeterministicValidationReport,
+    EditorialBlueprint,
     GlobalQaReport,
     Outline,
     SceneCard,
@@ -120,7 +121,55 @@ Synopsis:
 """.strip()
 
 
-def outline_user_prompt(synopsis: str, story_spec: StorySpec, intake_guidance: str | None = None) -> str:
+def editorial_blueprint_user_prompt(
+    synopsis: str,
+    story_spec: StorySpec,
+    intake_guidance: str | None = None,
+) -> str:
+    """Builds the prompt for the editorial blueprint."""
+
+    intake_block = (
+        f"\n\nBook intake guidance:\n{intake_guidance}"
+        if intake_guidance
+        else ""
+    )
+    return f"""
+Build an EditorialBlueprint that makes this novel sharper, more distinctive, and easier to draft cleanly in one pass.
+
+Requirements:
+- protagonist_name should name the story's central engine of choice and consequence.
+- relationship_focus_name should name the person or bond whose deterioration or strain gives the story intimate cost.
+- relationship_focus_role should explain why that bond matters on-page.
+- counterforce_name should name the human or institutional force tightening the net.
+- counterforce_role should explain how that force hunts, audits, exposes, corners, or otherwise applies pressure.
+- commercial_hook should state what makes the novel hard to ignore in the market.
+- voice_anchors should contain 4-8 operational prose imperatives.
+- motif_threads should contain 3-6 recurring image, object, or ritual systems that can compound meaning across the book.
+- suspense_ladder should contain 5-8 escalating ratchets from opening through climax.
+- relationship_ladder should contain 4-7 concrete degradations, refusals, reversals, or costs in the central relationship.
+- moral_pressure_ladder should contain 4-7 thresholds the protagonist crosses, resists, or rationalizes.
+- reveal_ladder should contain 4-7 staged disclosures or reframes that keep the manuscript compounding.
+- set_piece_requirements should contain 3-6 dramatized sequences the book should absolutely earn on-page.
+- chapter_missions must contain exactly {story_spec.expected_chapters} one-sentence chapter jobs, in order.
+- ending_payoffs should contain 3-6 promises the ending must cash.
+- Convert the synopsis into operational constraints; do not simply restate it.
+
+StorySpec:
+{serialise_model(story_spec)}
+
+Synopsis:
+{synopsis}
+
+{intake_block}
+""".strip()
+
+
+def outline_user_prompt(
+    synopsis: str,
+    story_spec: StorySpec,
+    editorial_blueprint: EditorialBlueprint,
+    intake_guidance: str | None = None,
+) -> str:
     """Builds the outline prompt."""
     intake_block = (
         f"\n\nBook intake guidance:\n{intake_guidance}"
@@ -136,13 +185,17 @@ Requirements:
 - Give each chapter a distinct dramatic purpose.
 - Each chapter should contain two scene beats by default unless a different split is dramatically necessary.
 - Build a strong hook, a consequential midpoint turn, a dark-night turn, a payoff-rich climax, and a clean but not overly tidy resolution.
-- Every 2-3 scenes, advance at least one of these engines: adversarial pressure, relationship deterioration, moral compromise.
+- Every 2-3 scenes, advance at least one of these engines: adversarial pressure, relationship deterioration, moral compromise, or reveal pressure.
 - Do not let the middle become procedural drift. Each chapter should sharpen danger, intimacy, or irreversible consequence.
 - Make sure the hunter / pursuer / institutional-counterforce grows more intelligent over time.
+- Use chapter_missions, ladders, set pieces, and ending payoffs from the EditorialBlueprint as binding scaffold.
 - Preserve explicit intake obligations around relationship residue, must-have scenes, ending shape, motifs, and style pressure.
 
 StorySpec:
 {serialise_model(story_spec)}
+
+EditorialBlueprint:
+{serialise_model(editorial_blueprint)}
 
 Synopsis:
 {synopsis}
@@ -155,6 +208,7 @@ def scene_cards_user_prompt(
     synopsis: str,
     story_spec: StorySpec,
     outline: Outline,
+    editorial_blueprint: EditorialBlueprint,
     intake_guidance: str | None = None,
 ) -> str:
     """Builds the scene-card prompt."""
@@ -192,17 +246,21 @@ Requirements:
 - continuity_inputs should specify what prior facts the drafter must preserve.
 - continuity_outputs should specify what new facts the continuity tracker must record.
 - At least one meaningful thing must worsen, tighten, or become harder by the end of each scene.
-- Every 2-3 scenes, at least one of these must intensify: Marta's suspicion, Elena's withdrawal, or Daniel's moral compromise. If none intensify, the scene is probably decorative and should be cut or merged.
+- Every 2-3 scenes, at least one ladder beat from the EditorialBlueprint must intensify. If no ladder advances, the scene is probably decorative and should be cut or merged.
 - By scene 6 at latest, the counterforce must leave an on-page trace, rumor, memo, review footprint, or other concrete shadow.
 - If a scene could be paraphrased as competent analysis rather than dramatized conflict, redesign it before returning it.
 - Keep target_words between 900 and 2200 unless the dramatic function strongly justifies otherwise.
 - If the intake guidance names a shared ritual, object system, or administrative consequence, make sure the scene cards place those details where they can do real dramatic work.
+- Make sure the set_piece_requirements and ending_payoffs are visibly planted early enough to cash later.
 
 StorySpec:
 {serialise_model(story_spec)}
 
 Outline:
 {serialise_model(outline)}
+
+EditorialBlueprint:
+{serialise_model(editorial_blueprint)}
 
 Synopsis:
 {synopsis}
@@ -266,6 +324,7 @@ def scene_draft_user_prompt(
     intake_guidance: str | None,
     story_brief: str,
     chapter_brief: str,
+    editorial_blueprint: EditorialBlueprint,
     scene_card: SceneCard,
     continuity_brief: str,
     recent_scene_summaries: Iterable[str],
@@ -277,6 +336,16 @@ def scene_draft_user_prompt(
     rewrite_block = rewrite_brief or "None. Draft this cleanly on the first pass."
     current_draft_block = current_draft or "No prior draft."
     intake_block = f"\n\nIntake guidance:\n{intake_guidance}" if intake_guidance else ""
+    relationship_line = (
+        f"- If {editorial_blueprint.relationship_focus_name} appears, the relationship balance must change on-page through refusal, need, concealment, tenderness, or damage."
+        if editorial_blueprint.relationship_focus_name.strip()
+        else "- If the key intimate relationship appears, the relationship balance must change on-page."
+    )
+    counterforce_line = (
+        f"- If {editorial_blueprint.counterforce_name} appears, suspicion, danger, or exposure must tighten by the end."
+        if editorial_blueprint.counterforce_name.strip()
+        else "- If the counterforce appears, danger or exposure must tighten by the end."
+    )
 
     return f"""
 Write Scene {scene_card.scene_number} of the novel.
@@ -322,8 +391,9 @@ Continuity requirements:
 - Realize the subtext_engine indirectly; do not explain it.
 - Surface the POV character's desire and fear within the first 250 words through action or choice, not later explanation.
 - The POV character must withhold, misdirect, or pay an interpersonal price on-page; if the scene can be paraphrased as competent analysis, it is under-dramatized.
-- If Elena appears, someone must refuse, withdraw, or fail the relationship on-page.
-- If Marta appears, the field of suspicion must narrow, harden, or become more dangerous by the end.
+- Cash at least one relevant ladder beat from the EditorialBlueprint in this scene.
+{relationship_line}
+{counterforce_line}
 - The closing choice must land as consequence, not thematic summary.
 
 Avoid:
@@ -340,6 +410,9 @@ Avoid:
 
 Story brief:
 {story_brief}
+
+Editorial blueprint:
+{serialise_model(editorial_blueprint)}
 
 {intake_block}
 
@@ -421,6 +494,7 @@ def scene_qa_system_prompt(story_spec: StorySpec) -> str:
 
 def scene_qa_user_prompt(
     story_spec: StorySpec,
+    editorial_blueprint: EditorialBlueprint,
     scene_card: SceneCard,
     continuity_state: ContinuityState,
     validation_report: DeterministicValidationReport,
@@ -434,6 +508,9 @@ Evaluate the drafted scene against the contract below.
 
 StorySpec:
 {serialise_model(story_spec)}
+
+EditorialBlueprint:
+{serialise_model(editorial_blueprint)}
 
 SceneCard:
 {serialise_model(scene_card)}
@@ -465,6 +542,7 @@ def chapter_qa_system_prompt(story_spec: StorySpec) -> str:
 def chapter_qa_user_prompt(
     story_spec: StorySpec,
     outline: Outline,
+    editorial_blueprint: EditorialBlueprint,
     chapter_number: int,
     chapter_text: str,
     scene_cards: Iterable[SceneCard],
@@ -484,6 +562,9 @@ StorySpec:
 
 Outline:
 {serialise_model(outline)}
+
+EditorialBlueprint:
+{serialise_model(editorial_blueprint)}
 
 Relevant scene cards:
 {serialise_model([scene.model_dump() for scene in relevant_scene_cards])}
@@ -507,6 +588,7 @@ def arc_qa_system_prompt(story_spec: StorySpec) -> str:
 def arc_qa_user_prompt(
     story_spec: StorySpec,
     outline: Outline,
+    editorial_blueprint: EditorialBlueprint,
     arc_name: str,
     arc_focus: str,
     scene_numbers: list[int],
@@ -526,6 +608,9 @@ StorySpec:
 
 Outline:
 {serialise_model(outline)}
+
+EditorialBlueprint:
+{serialise_model(editorial_blueprint)}
 
 Scene numbers in this arc:
 {scene_numbers}
@@ -551,6 +636,7 @@ def global_qa_system_prompt(story_spec: StorySpec) -> str:
 def global_qa_user_prompt(
     story_spec: StorySpec,
     outline: Outline,
+    editorial_blueprint: EditorialBlueprint,
     manuscript_text: str,
     intake_guidance: str | None = None,
 ) -> str:
@@ -571,6 +657,9 @@ StorySpec:
 Outline:
 {serialise_model(outline)}
 
+EditorialBlueprint:
+{serialise_model(editorial_blueprint)}
+
 Manuscript:
 {manuscript_text}
 
@@ -581,6 +670,7 @@ Manuscript:
 def repair_scene_user_prompt(
     story_spec: StorySpec,
     outline: Outline,
+    editorial_blueprint: EditorialBlueprint,
     scene_card: SceneCard,
     continuity_state: ContinuityState,
     current_scene: str,
@@ -603,6 +693,9 @@ Requirements:
 
 SceneCard:
 {serialise_model(scene_card)}
+
+EditorialBlueprint:
+{serialise_model(editorial_blueprint)}
 
 Continuity state at the time of repair:
 {serialise_model(continuity_state)}

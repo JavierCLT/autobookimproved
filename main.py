@@ -37,7 +37,7 @@ def bootstrap_command(
     synopsis_file: Path | None = typer.Option(None, exists=True, file_okay=True, dir_okay=False),
     intake_file: Path | None = typer.Option(None, exists=True, file_okay=True, dir_okay=False),
 ) -> None:
-    """Creates StorySpec, Outline, SceneCards, and initial continuity artifacts."""
+    """Creates StorySpec, EditorialBlueprint, Outline, SceneCards, and initial continuity artifacts."""
 
     _require_story_input(synopsis_file, intake_file)
     pipeline = build_pipeline()
@@ -64,7 +64,7 @@ def run_project_command(
     synopsis_file: Path | None = typer.Option(None, exists=True, file_okay=True, dir_okay=False),
     intake_file: Path | None = typer.Option(None, exists=True, file_okay=True, dir_okay=False),
 ) -> None:
-    """Runs planning, drafting, assembly, global QA, and repairs."""
+    """Runs planning, drafting, assembly, editorial QA, global QA, and repairs."""
 
     _require_story_input(synopsis_file, intake_file)
     pipeline = build_pipeline()
@@ -81,6 +81,28 @@ def global_qa_command(
     pipeline = build_pipeline()
     report = pipeline.global_qa(project=project)
     console.print(f"Global QA pass_fail={report.pass_fail}")
+
+
+@app.command("assemble-manuscript")
+def assemble_manuscript_command(
+    project: str = typer.Option(..., help="Project slug or label."),
+) -> None:
+    """Assembles approved scenes into chapter files and manuscript outputs."""
+
+    pipeline = build_pipeline()
+    path = pipeline.assemble_manuscript(project=project)
+    console.print(f"Assembled manuscript at {path}")
+
+
+@app.command("editorial-qa")
+def editorial_qa_command(
+    project: str = typer.Option(..., help="Project slug or label."),
+) -> None:
+    """Runs chapter and arc editorial QA before manuscript-level QA."""
+
+    pipeline = build_pipeline()
+    pipeline.editorial_qa(project=project)
+    console.print("Editorial QA completed")
 
 
 @app.command("repair-project")

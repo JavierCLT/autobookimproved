@@ -94,6 +94,26 @@ class Outline(ArtifactModel):
     chapters: List[ChapterPlan] = Field(default_factory=list)
 
 
+class EditorialBlueprint(ArtifactModel):
+    """Operational editorial scaffold that sharpens the plan before drafting."""
+
+    protagonist_name: str
+    relationship_focus_name: str
+    relationship_focus_role: str
+    counterforce_name: str
+    counterforce_role: str
+    commercial_hook: str
+    voice_anchors: List[str] = Field(default_factory=list)
+    motif_threads: List[str] = Field(default_factory=list)
+    suspense_ladder: List[str] = Field(default_factory=list)
+    relationship_ladder: List[str] = Field(default_factory=list)
+    moral_pressure_ladder: List[str] = Field(default_factory=list)
+    reveal_ladder: List[str] = Field(default_factory=list)
+    set_piece_requirements: List[str] = Field(default_factory=list)
+    chapter_missions: List[str] = Field(default_factory=list)
+    ending_payoffs: List[str] = Field(default_factory=list)
+
+
 class SceneCard(ArtifactModel):
     """Locked scene contract for drafting."""
 

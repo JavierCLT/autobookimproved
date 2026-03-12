@@ -21,6 +21,7 @@ from novel_factory.schemas import (
     ChapterQaReport,
     ContinuityState,
     DeterministicValidationReport,
+    EditorialBlueprint,
     GlobalQaReport,
     Outline,
     SceneCard,
@@ -40,6 +41,7 @@ class SceneJudge:
         self,
         *,
         story_spec: StorySpec,
+        editorial_blueprint: EditorialBlueprint,
         scene_card: SceneCard,
         continuity_state: ContinuityState,
         validation_report: DeterministicValidationReport,
@@ -52,6 +54,7 @@ class SceneJudge:
             system_prompt=scene_qa_system_prompt(story_spec),
             user_prompt=scene_qa_user_prompt(
                 story_spec=story_spec,
+                editorial_blueprint=editorial_blueprint,
                 scene_card=scene_card,
                 continuity_state=continuity_state,
                 validation_report=validation_report,
@@ -79,6 +82,7 @@ class GlobalJudge:
         *,
         story_spec: StorySpec,
         outline: Outline,
+        editorial_blueprint: EditorialBlueprint,
         manuscript_text: str,
         book_intake: BookIntake | None = None,
     ) -> GlobalQaReport:
@@ -89,6 +93,7 @@ class GlobalJudge:
             user_prompt=global_qa_user_prompt(
                 story_spec=story_spec,
                 outline=outline,
+                editorial_blueprint=editorial_blueprint,
                 manuscript_text=manuscript_text,
                 intake_guidance=build_planning_guidance(book_intake, max_chars=8_000),
             ),
@@ -105,6 +110,7 @@ class GlobalJudge:
         *,
         story_spec: StorySpec,
         outline: Outline,
+        editorial_blueprint: EditorialBlueprint,
         chapter_number: int,
         chapter_text: str,
         scene_cards: list[SceneCard],
@@ -116,6 +122,7 @@ class GlobalJudge:
             user_prompt=chapter_qa_user_prompt(
                 story_spec=story_spec,
                 outline=outline,
+                editorial_blueprint=editorial_blueprint,
                 chapter_number=chapter_number,
                 chapter_text=chapter_text,
                 scene_cards=scene_cards,
@@ -133,6 +140,7 @@ class GlobalJudge:
         *,
         story_spec: StorySpec,
         outline: Outline,
+        editorial_blueprint: EditorialBlueprint,
         arc_name: str,
         arc_focus: str,
         scene_numbers: list[int],
@@ -145,6 +153,7 @@ class GlobalJudge:
             user_prompt=arc_qa_user_prompt(
                 story_spec=story_spec,
                 outline=outline,
+                editorial_blueprint=editorial_blueprint,
                 arc_name=arc_name,
                 arc_focus=arc_focus,
                 scene_numbers=scene_numbers,

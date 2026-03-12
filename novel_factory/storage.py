@@ -70,6 +70,10 @@ class RunStorage:
         return self.root / "outline.json"
 
     @property
+    def editorial_blueprint_path(self) -> Path:
+        return self.root / "editorial_blueprint.json"
+
+    @property
     def scene_cards_path(self) -> Path:
         return self.root / "scene_cards.json"
 

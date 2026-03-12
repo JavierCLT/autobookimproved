@@ -8,6 +8,7 @@ from collections import Counter
 from novel_factory.schemas import (
     ContinuityState,
     DeterministicValidationReport,
+    EditorialBlueprint,
     Outline,
     PlanValidationReport,
     SceneCard,
@@ -596,6 +597,7 @@ class PlanValidator:
         self,
         *,
         story_spec: StorySpec,
+        editorial_blueprint: EditorialBlueprint,
         outline: Outline,
         scene_cards: list[SceneCard],
         initial_continuity: ContinuityState,
@@ -604,12 +606,78 @@ class PlanValidator:
 
         findings: list[ValidationFinding] = []
         findings.extend(self._structure_findings(story_spec, outline, scene_cards))
+        findings.extend(self._blueprint_findings(story_spec, editorial_blueprint))
         findings.extend(self._scene_contract_findings(scene_cards))
-        findings.extend(self._counterforce_findings(scene_cards))
-        findings.extend(self._rolling_intensity_findings(scene_cards))
+        findings.extend(self._counterforce_findings(scene_cards, editorial_blueprint))
+        findings.extend(self._rolling_intensity_findings(scene_cards, editorial_blueprint))
         findings.extend(self._initial_continuity_findings(initial_continuity))
         has_errors = any(finding.severity == "error" for finding in findings)
         return PlanValidationReport(pass_fail=not has_errors, findings=findings)
+
+    def _blueprint_findings(
+        self,
+        story_spec: StorySpec,
+        editorial_blueprint: EditorialBlueprint,
+    ) -> list[ValidationFinding]:
+        """Validates the editorial blueprint used to sharpen drafting."""
+
+        findings: list[ValidationFinding] = []
+        required_fields = (
+            "protagonist_name",
+            "relationship_focus_name",
+            "relationship_focus_role",
+            "counterforce_name",
+            "counterforce_role",
+            "commercial_hook",
+        )
+        missing = [
+            field_name
+            for field_name in required_fields
+            if self._is_placeholder(getattr(editorial_blueprint, field_name))
+        ]
+        if missing:
+            findings.append(
+                ValidationFinding(
+                    check_id="editorial_blueprint_core_fields",
+                    severity="error",
+                    message="Editorial blueprint is missing core commercial or role anchors.",
+                    details=missing,
+                )
+            )
+        if len(editorial_blueprint.chapter_missions) != story_spec.expected_chapters:
+            findings.append(
+                ValidationFinding(
+                    check_id="editorial_blueprint_chapter_missions",
+                    severity="error",
+                    message="Editorial blueprint chapter_missions count does not match StorySpec.",
+                    details=[
+                        f"Expected: {story_spec.expected_chapters}",
+                        f"Actual: {len(editorial_blueprint.chapter_missions)}",
+                    ],
+                )
+            )
+        ladder_fields = {
+            "voice_anchors": 4,
+            "motif_threads": 3,
+            "suspense_ladder": 4,
+            "relationship_ladder": 3,
+            "moral_pressure_ladder": 3,
+            "reveal_ladder": 3,
+            "set_piece_requirements": 2,
+            "ending_payoffs": 2,
+        }
+        for field_name, minimum_items in ladder_fields.items():
+            values = getattr(editorial_blueprint, field_name)
+            if len([value for value in values if value.strip()]) < minimum_items:
+                findings.append(
+                    ValidationFinding(
+                        check_id=f"editorial_blueprint_{field_name}",
+                        severity="error",
+                        message=f"Editorial blueprint field '{field_name}' is too thin to guide the draft.",
+                        details=[f"Need at least {minimum_items} items."],
+                    )
+                )
+        return findings
 
     def _structure_findings(
         self,
@@ -691,9 +759,13 @@ class PlanValidator:
                 )
         return findings
 
-    def _counterforce_findings(self, scene_cards: list[SceneCard]) -> list[ValidationFinding]:
+    def _counterforce_findings(
+        self,
+        scene_cards: list[SceneCard],
+        editorial_blueprint: EditorialBlueprint,
+    ) -> list[ValidationFinding]:
         first_six = scene_cards[:6]
-        if any(self._has_counterforce_trace(scene) for scene in first_six):
+        if any(self._has_counterforce_trace(scene, editorial_blueprint) for scene in first_six):
             return []
         return [
             ValidationFinding(
@@ -704,13 +776,17 @@ class PlanValidator:
             )
         ]
 
-    def _rolling_intensity_findings(self, scene_cards: list[SceneCard]) -> list[ValidationFinding]:
+    def _rolling_intensity_findings(
+        self,
+        scene_cards: list[SceneCard],
+        editorial_blueprint: EditorialBlueprint,
+    ) -> list[ValidationFinding]:
         findings: list[ValidationFinding] = []
         if len(scene_cards) < 3:
             return findings
         for start in range(0, len(scene_cards) - 2):
             window = scene_cards[start : start + 3]
-            if any(self._window_intensifier(scene) for scene in window):
+            if any(self._window_intensifier(scene, editorial_blueprint) for scene in window):
                 continue
             findings.append(
                 ValidationFinding(
@@ -747,29 +823,21 @@ class PlanValidator:
             )
         return findings
 
-    def _has_counterforce_trace(self, scene: SceneCard) -> bool:
+    def _has_counterforce_trace(
+        self,
+        scene: SceneCard,
+        editorial_blueprint: EditorialBlueprint,
+    ) -> bool:
         trace = scene.counterforce_trace
         if self._is_placeholder(trace):
             return False
-        return any(
-            keyword in trace.lower()
-            for keyword in (
-                "marta",
-                "conduct",
-                "review",
-                "suspicion",
-                "extract",
-                "audit",
-                "question",
-                "inquiry",
-                "memo",
-                "trace",
-                "footprint",
-                "compliance",
-            )
-        )
+        return any(keyword in trace.lower() for keyword in self._counterforce_keywords(editorial_blueprint))
 
-    def _window_intensifier(self, scene: SceneCard) -> bool:
+    def _window_intensifier(
+        self,
+        scene: SceneCard,
+        editorial_blueprint: EditorialBlueprint,
+    ) -> bool:
         suspicion_text = " ".join([scene.suspicion_delta, scene.counterforce_trace]).lower()
         relationship_text = " ".join([scene.relationship_delta, scene.cost_paid, scene.secret_pressure]).lower()
         moral_text = " ".join(
@@ -781,10 +849,64 @@ class PlanValidator:
             ]
         ).lower()
         return (
-            any(keyword in suspicion_text for keyword in ("marta", "conduct", "review", "suspicion", "extract", "audit", "closer"))
-            or any(keyword in relationship_text for keyword in ("elena", "marriage", "withdraw", "distance", "silence", "home", "leave", "refuse", "cold"))
+            any(keyword in suspicion_text for keyword in self._counterforce_keywords(editorial_blueprint))
+            or any(keyword in relationship_text for keyword in self._relationship_keywords(editorial_blueprint))
             or any(keyword in moral_text for keyword in ("lie", "conceal", "withhold", "tamper", "deceive", "betray", "break", "violate", "cover", "manipulate", "hide"))
         )
 
     def _is_placeholder(self, value: str) -> bool:
         return re.sub(r"\s+", " ", value or "").strip().lower() in self.PLACEHOLDER_VALUES
+
+    def _counterforce_keywords(self, editorial_blueprint: EditorialBlueprint) -> set[str]:
+        """Returns generic and story-specific keywords that indicate pursuit pressure."""
+
+        return self._keyword_tokens(
+            editorial_blueprint.counterforce_name,
+            editorial_blueprint.counterforce_role,
+            "hunt",
+            "hunter",
+            "review",
+            "suspicion",
+            "audit",
+            "compliance",
+            "trace",
+            "footprint",
+            "memo",
+            "inquiry",
+            "question",
+            "exposure",
+            "request",
+            "pursuit",
+        )
+
+    def _relationship_keywords(self, editorial_blueprint: EditorialBlueprint) -> set[str]:
+        """Returns generic and story-specific keywords that indicate intimate cost."""
+
+        return self._keyword_tokens(
+            editorial_blueprint.relationship_focus_name,
+            editorial_blueprint.relationship_focus_role,
+            "relationship",
+            "marriage",
+            "trust",
+            "distance",
+            "withdraw",
+            "silence",
+            "home",
+            "love",
+            "leave",
+            "refuse",
+            "cold",
+            "betray",
+            "intimacy",
+            "family",
+        )
+
+    def _keyword_tokens(self, *values: str) -> set[str]:
+        """Normalizes relevant keyword tokens from names, roles, and generic hints."""
+
+        tokens: set[str] = set()
+        for value in values:
+            for token in re.findall(r"[a-z0-9']+", (value or "").lower()):
+                if len(token) >= 4 and token not in ENTITY_STOPWORDS:
+                    tokens.add(token)
+        return tokens

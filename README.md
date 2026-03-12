@@ -13,6 +13,7 @@ Each project is stored under `runs/<project_slug>/` and includes:
 - `book_intake.md` and `book_intake.json` when an intake file is used
 - `input_synopsis.md`
 - `story_spec.json`
+- `editorial_blueprint.json`
 - `outline.json`
 - `scene_cards.json`
 - `initial_continuity_state.json`
@@ -29,14 +30,18 @@ Each project is stored under `runs/<project_slug>/` and includes:
 ## Pipeline
 
 1. `bootstrap`
-   Reads either a synopsis or a structured intake file and generates `StorySpec`, `Outline`, `SceneCards`, and initial continuity.
+   Reads either a synopsis or a structured intake file and generates `StorySpec`, an `EditorialBlueprint`, `Outline`, `SceneCards`, and initial continuity.
 2. `draft-scene`
    Builds scene context, drafts a scene, runs deterministic validators, runs scene QA, and rewrites up to two times if needed.
-3. `run-project`
-   Runs the full pipeline from planning through manuscript assembly, global QA, and targeted repairs.
-4. `global-qa`
+3. `assemble-manuscript`
+   Assembles approved scenes into chapter files and final manuscript outputs.
+4. `editorial-qa`
+   Runs chapter-level and arc-level editorial QA before manuscript-level judging.
+5. `run-project`
+   Runs the full pipeline from planning through manuscript assembly, editorial QA, global QA, and targeted repairs.
+6. `global-qa`
    Evaluates the assembled manuscript for hook strength, payoff, continuity, boredom risk, voice consistency, and AI-smell risk.
-5. `repair-project`
+7. `repair-project`
    Rewrites only the scenes flagged by the last failed global QA pass, then reassembles and re-runs QA.
 
 ## Setup
@@ -112,6 +117,18 @@ python main.py draft-scene --project my_book --scene-index 5 --force
 python main.py run-project --project my_book --synopsis-file synopsis.md
 ```
 
+### Assemble a manuscript from approved scenes
+
+```bash
+python main.py assemble-manuscript --project my_book
+```
+
+### Run chapter and arc editorial QA
+
+```bash
+python main.py editorial-qa --project my_book
+```
+
 ### Run the full project from an intake template
 
 ```bash
@@ -139,6 +156,7 @@ python main.py repair-project --project my_book
 - `continuity_state.json` is updated after each approved scene.
 - `run_log.jsonl` records phase transitions and scene attempts.
 - `run-project` resumes from the longest contiguous prefix of approved scenes.
+- The editorial blueprint locks chapter missions, motif threads, escalation ladders, and ending payoffs before drafting starts.
 - Continuity can be rebuilt from `initial_continuity_state.json` plus approved scenes, which keeps the run recoverable after interruption or repair.
 
 If a scene fails repeatedly, the run stops without saving it into `scenes/`. Fix the issue, adjust prompts or inputs if needed, and rerun `python main.py draft-scene ...` or `python main.py run-project ...`.
