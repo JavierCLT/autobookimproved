@@ -883,6 +883,31 @@ class NovelPipeline:
             )
         return specs
 
+    def _intimate_relationship_keywords(self, editorial_blueprint: EditorialBlueprint) -> set[str]:
+        """Returns keywords that imply intimate or domestic relationship cost."""
+
+        return self._keyword_tokens(
+            editorial_blueprint.relationship_focus_name,
+            "marriage",
+            "spouse",
+            "wife",
+            "husband",
+            "partner",
+            "home",
+            "love",
+            "intimacy",
+            "family",
+            "divorce",
+            "separation",
+            "bedroom",
+            "kitchen",
+            "distance",
+            "withdraw",
+            "silence",
+            "leave",
+            "refuse",
+        )
+
     def _scene_has_counterforce(
         self,
         scene_card: SceneCard,
@@ -912,7 +937,7 @@ class NovelPipeline:
         relationship_name = editorial_blueprint.relationship_focus_name.lower().strip()
         return (
             bool(relationship_name and relationship_name in scene_card.pov_character.lower())
-            or any(keyword in text for keyword in self._relationship_keywords(editorial_blueprint))
+            or any(keyword in text for keyword in self._intimate_relationship_keywords(editorial_blueprint))
         )
 
     def _run_scene_loop(
@@ -1384,7 +1409,7 @@ class NovelPipeline:
         text = " ".join([scene_card.relationship_delta, scene_card.secret_pressure, scene_card.cost_paid]).lower()
         required_entities_text = " ".join(scene_card.required_entities).lower()
         location_text = scene_card.location.lower()
-        relationship_keywords = self._relationship_keywords(editorial_blueprint)
+        relationship_keywords = self._intimate_relationship_keywords(editorial_blueprint)
         relationship_name = editorial_blueprint.relationship_focus_name.lower().strip()
         if "off-page" in text:
             return False
